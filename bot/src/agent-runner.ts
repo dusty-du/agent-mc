@@ -9,7 +9,17 @@ import {
   ResidentExecutive,
   SleepCore
 } from "@resident/brain";
-import { ActionReport, DailyOutcome, MemoryObservation, MemoryState, PerceptionFrame, ProtectedArea, ReplanTrigger } from "@resident/shared";
+import {
+  ActionReport,
+  DailyOutcome,
+  MemoryObservation,
+  MemoryState,
+  OvernightConsolidation,
+  PerceptionFrame,
+  ProtectedArea,
+  ReplanTrigger,
+  ValueProfile
+} from "@resident/shared";
 import { DEFAULT_VALUE_PROFILE } from "@resident/shared";
 import { LiveMineflayerDriver, LiveMineflayerDriverConfig } from "./live-mineflayer-driver";
 import { IntentExecutionContext, ResidentBotRuntime } from "./resident-bot";
@@ -60,10 +70,26 @@ export class ResidentAgentRunner {
     let values = await this.sleepCore.currentValues().catch(() => DEFAULT_VALUE_PROFILE);
     let previousPerception = (await this.runtime.tick()).perception;
     await this.memory.syncPerception(previousPerception, latestOvernight);
+    ({ latestOvernight, values } = await this.flushPendingSleepWork(latestOvernight, values));
+    residentLog("runner_start", {
+      agent: previousPerception.agent_id,
+      position: previousPerception.position,
+      brainPort: this.brainPort,
+      serveBrain: this.serveBrain
+    });
 
     while (!this.stopped) {
+      ({ latestOvernight, values } = await this.flushPendingSleepWork(latestOvernight, values));
       const trigger = this.pendingTrigger;
       const currentMemory = await this.memory.current();
+      residentLog("planning_turn", {
+        trigger,
+        day: currentMemory.current_day,
+        hunger: previousPerception.hunger,
+        health: previousPerception.health,
+        hostiles: previousPerception.combat_state.hostilesNearby,
+        position: previousPerception.position
+      });
       const decision = await this.executive.decide(previousPerception, currentMemory, values, latestOvernight, trigger);
       const latestMemory = await this.memory.current();
       await this.memory.replace(mergeMemoryState(decision.memory, latestMemory));
@@ -73,6 +99,12 @@ export class ResidentAgentRunner {
       this.daily.recordObservations(decision.observations);
 
       if (decision.recallQuery) {
+        residentLog("recall_query", {
+          query: decision.recallQuery.query,
+          tags: decision.recallQuery.tags ?? [],
+          place: decision.recallQuery.place,
+          project: decision.recallQuery.project_id
+        });
         const recall = await this.sleepCore.recall(decision.recallQuery);
         const best = recall.matches[0];
         if (best) {
@@ -94,6 +126,12 @@ export class ResidentAgentRunner {
       const tickResult = await this.runtime.tick(decision.intent, context);
       const nextPerception = tickResult.perception;
       const report = tickResult.report;
+      residentLog("action_execution", {
+        intent: decision.intent.intent_type,
+        target: decision.intent.target,
+        status: report?.status ?? "no-report",
+        notes: report?.notes ?? []
+      });
       await this.memory.syncPerception(nextPerception, latestOvernight);
       if (report) {
         await this.memory.rememberReport(report);
@@ -103,9 +141,37 @@ export class ResidentAgentRunner {
 
       if (decision.intent.intent_type === "sleep" && report?.status === "completed") {
         const bundle = await this.memory.buildBundle(nextPerception.agent_id);
-        const record = await this.sleepCore.consolidate(bundle, this.daily.toOutcome(bundle.day_number));
-        latestOvernight = record.overnight;
-        values = await this.sleepCore.currentValues();
+        const outcome = this.daily.toOutcome(bundle.day_number);
+        residentLog("memory_handoff", {
+          day: bundle.day_number,
+          summary: bundle.summary,
+          observations: bundle.observations.length,
+          projects: bundle.active_projects.length
+        });
+        try {
+          const record = await this.sleepCore.consolidate(bundle, outcome);
+          latestOvernight = record.overnight;
+          residentLog("nightly_consolidation", {
+            day: record.dayNumber,
+            summary: record.summary,
+            insights: record.insights
+          });
+          values = await this.sleepCore.currentValues();
+          residentLog("value_update", {
+            updatedAt: values.updatedAt,
+            joy: values.joy,
+            safety: values.safety,
+            hospitality: values.hospitality,
+            curiosity: values.curiosity
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          await this.memory.queueSleepWork(bundle, outcome, message);
+          residentLog("sleep_queue", {
+            day: bundle.day_number,
+            error: message
+          });
+        }
         this.pendingTrigger = "wake";
         this.daily.reset();
       } else {
@@ -120,6 +186,51 @@ export class ResidentAgentRunner {
   stop(): void {
     this.stopped = true;
     this.brainServer?.close();
+  }
+
+  private async flushPendingSleepWork(
+    latestOvernight: OvernightConsolidation | undefined,
+    values: ValueProfile
+  ): Promise<{ latestOvernight: OvernightConsolidation | undefined; values: ValueProfile }> {
+    const pending = await this.memory.pendingSleepWork();
+    for (const entry of pending) {
+      try {
+        residentLog("sleep_replay", {
+          day: entry.bundle.day_number,
+          queuedAt: entry.queued_at,
+          attempts: entry.attempts
+        });
+        const record = await this.sleepCore.consolidate(entry.bundle, entry.outcome);
+        await this.memory.resolveSleepWork(entry.id);
+        latestOvernight = record.overnight;
+        residentLog("nightly_consolidation", {
+          day: record.dayNumber,
+          summary: record.summary,
+          insights: record.insights,
+          replay: true
+        });
+        values = await this.sleepCore.currentValues().catch(() => values);
+        residentLog("value_update", {
+          updatedAt: values.updatedAt,
+          joy: values.joy,
+          safety: values.safety,
+          hospitality: values.hospitality,
+          curiosity: values.curiosity,
+          replay: true
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.memory.markSleepWorkRetry(entry.id, message);
+        residentLog("sleep_replay_failed", {
+          day: entry.bundle.day_number,
+          error: message,
+          attempts: entry.attempts + 1
+        });
+        break;
+      }
+    }
+
+    return { latestOvernight, values };
   }
 }
 
@@ -302,6 +413,17 @@ function hasNewPlayer(previous: PerceptionFrame, current: PerceptionFrame): bool
 
 function inventoryHash(inventory: Record<string, number>): string {
   return createHash("sha1").update(JSON.stringify(Object.entries(inventory).sort())).digest("hex");
+}
+
+function residentLog(event: string, payload: Record<string, unknown>): void {
+  process.stdout.write(
+    `${JSON.stringify({
+      ts: new Date().toISOString(),
+      component: "resident-runner",
+      event,
+      ...payload
+    })}\n`
+  );
 }
 
 function mergeMemoryState(primary: MemoryState, latest: MemoryState): MemoryState {

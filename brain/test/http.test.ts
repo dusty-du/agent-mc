@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { DailyOutcome } from "@resident/shared";
 import { FileBackedMemoryStore } from "../src/memory/file-store";
 import { MemoryManager } from "../src/memory/memory-manager";
@@ -153,6 +153,43 @@ describe("createResidentBrainServer", () => {
 
     expect(record.overnight.value_shift_summary.some((entry) => entry.includes("cozy home"))).toBe(true);
   });
+
+  it("queues sleep work in awake memory when consolidation fails", async () => {
+    const { port, memory, sleepCore } = await createHarness(cleanups);
+    vi.spyOn(sleepCore, "consolidate").mockRejectedValueOnce(new Error("sleep-core offline"));
+
+    const observationResponse = await fetch(`http://127.0.0.1:${port}/memory/observations`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        timestamp: new Date().toISOString(),
+        category: "sleep",
+        summary: "The resident is ready to hand the day to sleep.",
+        tags: ["sleep", "handoff"],
+        importance: 0.8,
+        source: "action"
+      })
+    });
+    expect(observationResponse.status).toBe(202);
+
+    const response = await fetch(`http://127.0.0.1:${port}/sleep`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        agentId: "resident-1",
+        outcome: defaultOutcome
+      })
+    });
+
+    expect(response.status).toBe(202);
+    const pending = await memory.pendingSleepWork();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.last_error).toContain("sleep-core offline");
+  });
 });
 
 async function createHarness(cleanups: Array<() => Promise<void>>) {
@@ -168,6 +205,7 @@ async function createHarness(cleanups: Array<() => Promise<void>>) {
   });
 
   return {
+    port,
     memory,
     sleepCore,
     async postEvent(event: Record<string, unknown>) {

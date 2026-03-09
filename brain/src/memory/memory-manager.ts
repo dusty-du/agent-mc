@@ -1,5 +1,6 @@
 import {
   ActionReport,
+  DailyOutcome,
   MemoryBundle,
   MemoryObservation,
   MemoryState,
@@ -8,7 +9,7 @@ import {
   ProtectedArea,
   WakeOrientation
 } from "@resident/shared";
-import { FileBackedMemoryStore } from "./file-store";
+import { FileBackedMemoryStore, PendingSleepWork } from "./file-store";
 import {
   applyWakeOrientation,
   buildMemoryBundle,
@@ -79,5 +80,46 @@ export class MemoryManager {
   async buildBundle(agentId: string): Promise<MemoryBundle> {
     const data = await this.store.load();
     return buildMemoryBundle(data.memory, agentId);
+  }
+
+  async queueSleepWork(bundle: MemoryBundle, outcome: DailyOutcome, lastError?: string): Promise<PendingSleepWork> {
+    const data = await this.store.load();
+    const queued: PendingSleepWork = {
+      id: `${bundle.day_number}:${bundle.created_at}`,
+      queued_at: new Date().toISOString(),
+      bundle,
+      outcome,
+      attempts: 1,
+      last_error: lastError
+    };
+    data.pending_sleep_work = data.pending_sleep_work.filter((entry) => entry.id !== queued.id);
+    data.pending_sleep_work.push(queued);
+    await this.store.save(data);
+    return queued;
+  }
+
+  async pendingSleepWork(): Promise<PendingSleepWork[]> {
+    const data = await this.store.load();
+    return data.pending_sleep_work;
+  }
+
+  async resolveSleepWork(id: string): Promise<void> {
+    const data = await this.store.load();
+    data.pending_sleep_work = data.pending_sleep_work.filter((entry) => entry.id !== id);
+    await this.store.save(data);
+  }
+
+  async markSleepWorkRetry(id: string, lastError: string): Promise<void> {
+    const data = await this.store.load();
+    data.pending_sleep_work = data.pending_sleep_work.map((entry) =>
+      entry.id === id
+        ? {
+            ...entry,
+            attempts: entry.attempts + 1,
+            last_error: lastError
+          }
+        : entry
+    );
+    await this.store.save(data);
   }
 }

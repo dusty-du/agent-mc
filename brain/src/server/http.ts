@@ -314,9 +314,16 @@ export function createResidentBrainServer(memory: MemoryManager, sleepCore: Slee
       if (request.method === "POST" && request.url === "/sleep") {
         const body = await readJson<{ agentId?: string; outcome: DailyOutcome }>(request);
         const bundle = await memory.buildBundle(body.agentId ?? "resident-1");
-        const record = await sleepCore.consolidate(bundle, body.outcome);
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify(record));
+        try {
+          const record = await sleepCore.consolidate(bundle, body.outcome);
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify(record));
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          const queued = await memory.queueSleepWork(bundle, body.outcome, message);
+          response.writeHead(202, { "content-type": "application/json" });
+          response.end(JSON.stringify({ status: "queued", queued }));
+        }
         return;
       }
 

@@ -14,6 +14,7 @@ An implementation scaffold for an autonomous Minecraft resident with:
 - An optional OpenAI executive layer that can choose non-urgent life directions while deterministic safety rules still guard danger, hunger, and sleep.
 - A unified awake memory layer that tracks world facts, current goals, recent observations, self-narrative, and end-of-day memory bundles.
 - A sleep-core service with a file-backed store, nightly consolidation, long-term recall, and value updates.
+- Graceful degradation for sleep failures: awake memory can queue unfinished sleep bundles for later replay instead of losing the day.
 - A semantic build planner for open-ended construction and remodeling.
 - A recipe-driven craft planner using `minecraft-data`.
 - A Mineflayer runtime wrapper plus a live driver that returns structured action reports for eating, crafting, mining, building, combat, recovery, and more.
@@ -58,6 +59,8 @@ The Paper plugin is configured to post player/world events to `POST /brain/event
 - weather changes in the resident's world
 - explicit player praise/critique feedback
 
+If `POST /sleep` cannot reach a healthy sleep-core consolidation pass, the current `MemoryBundle` is queued in awake memory for later replay instead of being discarded.
+
 ## Run The Resident
 
 Start the autonomous resident loop:
@@ -98,4 +101,5 @@ Set the resident account name in [`config.yml`](plugin/src/main/resources/config
 - Awake `memory` owns live world facts, short-horizon continuity, and the end-of-day `MemoryBundle`.
 - `sleep-core` only runs sleep-time consolidation and long-term autobiographical integration; wake orientation is produced by the awake brain after reading the morning world state.
 - The resident is designed around bounded flourishing rather than reward maximization, and happiness is allowed to survive failure.
+- The runner emits structured JSON logs for planning turns, recall, action execution, memory handoff, consolidation, and value updates.
 - ALMA is intentionally out of scope here.
