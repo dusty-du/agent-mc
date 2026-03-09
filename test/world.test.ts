@@ -229,6 +229,219 @@ describe("world bootstrap", () => {
     expect(config.minecraftPort).toBe(25570);
     expect(config.minecraftUsername).toBe("resident-a");
     expect(config.brainPort).toBe(9999);
+    expect(config.viewerPort).toBe("3000");
+  });
+
+  it("uses an explicit viewer port override when provided", () => {
+    const config = resolveWorldConfig({
+      MINECRAFT_VIEWER_PORT: "4123"
+    } as NodeJS.ProcessEnv);
+
+    expect(config.viewerPort).toBe("4123");
+  });
+
+  it("treats SIGINT during startup as a graceful shutdown", async () => {
+    const cwd = await createTempRepo();
+    const output = new PassThrough();
+    let logs = "";
+    output.on("data", (chunk) => {
+      logs += String(chunk);
+    });
+    const paperStdin = new PassThrough();
+
+    const spawnImpl = vi.fn((command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: unknown }) => {
+      const child = new FakeChild();
+
+      queueMicrotask(async () => {
+        const joined = [command, ...args].join(" ");
+        if (joined.includes(" ci")) {
+          await mkdir(join(cwd, "node_modules"), { recursive: true });
+          child.exit(0);
+          return;
+        }
+
+        if (joined.includes(" run build")) {
+          child.exit(0);
+          return;
+        }
+
+        if (joined.includes("gradlew") && joined.includes(" build")) {
+          await mkdir(join(cwd, "plugin", "build", "libs"), { recursive: true });
+          await writeFile(
+            join(cwd, "plugin", "build", "libs", "agent-hytale-plugin-0.1.0-SNAPSHOT.jar"),
+            "jar",
+            "utf8"
+          );
+          child.exit(0);
+          return;
+        }
+
+        if (joined.includes("brain/dist/index.js")) {
+          child.stdout.write("resident brain listening on 8787\n");
+          return;
+        }
+
+        if (command === "java") {
+          child.stdin = paperStdin;
+          child.stdin.on("data", (chunk) => {
+            if (Buffer.from(chunk).toString("utf8").includes("stop")) {
+              child.exit(0);
+            }
+          });
+          queueMicrotask(() => {
+            process.emit("SIGINT");
+          });
+        }
+      });
+
+      return child as any;
+    });
+
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes("/builds")) {
+        return jsonResponse([
+          {
+            id: 207,
+            channel: "STABLE",
+            downloads: {
+              "server:default": {
+                name: "paper-1.21.4-207.jar",
+                checksums: { sha256: "abc" },
+                url: "https://example.invalid/paper-207.jar"
+              }
+            }
+          }
+        ]);
+      }
+
+      return binaryResponse("paper-binary");
+    });
+
+    await expect(
+      bootstrapWorld({
+        cwd,
+        env: {
+          MINECRAFT_PORT: "25565",
+          MINECRAFT_USERNAME: "resident-1",
+          RESIDENT_BRAIN_PORT: "8787"
+        },
+        fetchImpl,
+        spawnImpl,
+        output,
+        installSignalHandlers: true,
+        paperReadyTimeoutMs: 5_000
+      })
+    ).rejects.toThrow("Graceful shutdown (SIGINT)");
+
+    expect(logs).toContain("[world] shutting down (SIGINT)");
+  });
+
+  it("opens the viewer in a browser when the bot reports it ready", async () => {
+    const cwd = await createTempRepo();
+    const output = new PassThrough();
+    const spawnCalls: Array<{ command: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv; stdio?: unknown }> = [];
+    const paperStdin = new PassThrough();
+
+    const spawnImpl = vi.fn((command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: unknown }) => {
+      spawnCalls.push({ command, args, cwd: options.cwd, env: options.env, stdio: options.stdio });
+      const child = new FakeChild() as FakeChild & { unref: ReturnType<typeof vi.fn> };
+      child.unref = vi.fn();
+
+      queueMicrotask(async () => {
+        const joined = [command, ...args].join(" ");
+        if (joined.includes(" ci")) {
+          await mkdir(join(cwd, "node_modules"), { recursive: true });
+          child.exit(0);
+          return;
+        }
+
+        if (joined.includes(" run build")) {
+          child.exit(0);
+          return;
+        }
+
+        if (joined.includes("gradlew") && joined.includes(" build")) {
+          await mkdir(join(cwd, "plugin", "build", "libs"), { recursive: true });
+          await writeFile(
+            join(cwd, "plugin", "build", "libs", "agent-hytale-plugin-0.1.0-SNAPSHOT.jar"),
+            "jar",
+            "utf8"
+          );
+          child.exit(0);
+          return;
+        }
+
+        if (joined.includes("brain/dist/index.js")) {
+          child.stdout.write("resident brain listening on 8787\n");
+          return;
+        }
+
+        if (command === "java") {
+          child.stdin = paperStdin;
+          child.stdin.on("data", (chunk) => {
+            if (Buffer.from(chunk).toString("utf8").includes("stop")) {
+              child.exit(0);
+            }
+          });
+          child.stdout.write('[Server thread/INFO]: Done (1.234s)! For help, type "help"\n');
+          return;
+        }
+
+        if (joined.includes("bot/dist/index.js")) {
+          child.stdout.write("Prismarine viewer web server running on *:3000\n");
+          child.stdout.write('{"component":"resident-runner","event":"runner_start"}\n');
+          return;
+        }
+      });
+
+      return child as any;
+    });
+
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes("/builds")) {
+        return jsonResponse([
+          {
+            id: 207,
+            channel: "STABLE",
+            downloads: {
+              "server:default": {
+                name: "paper-1.21.4-207.jar",
+                checksums: { sha256: "abc" },
+                url: "https://example.invalid/paper-207.jar"
+              }
+            }
+          }
+        ]);
+      }
+
+      return binaryResponse("paper-binary");
+    });
+
+    const session = await bootstrapWorld({
+      cwd,
+      env: {
+        MINECRAFT_PORT: "25565",
+        MINECRAFT_USERNAME: "resident-1",
+        RESIDENT_BRAIN_PORT: "8787"
+      },
+      fetchImpl,
+      spawnImpl,
+      output,
+      installSignalHandlers: false,
+      paperReadyTimeoutMs: 5_000
+    });
+
+    const openCall = spawnCalls.find((call) => call.command === "open");
+    expect(openCall).toEqual(
+      expect.objectContaining({
+        args: ["http://127.0.0.1:3000"],
+        cwd: cwd,
+        stdio: "ignore"
+      })
+    );
+
+    await session.shutdown("test");
+    await session.completionPromise.catch(() => undefined);
   });
 
   it("overrides conflicting parent llm env when launching brain and bot", async () => {

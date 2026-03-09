@@ -25,11 +25,19 @@ export const PAPER_READY_PATTERN = /Done \([^)]+\)! For help, type "help"/;
 export const PAPER_USER_AGENT = "agent-hytale/0.1.0 (world bootstrap)";
 export const LOCAL_SERVER_NAME = "agent-hytale-local";
 export const RUNTIME_DIRNAME = ".runtime";
+export const VIEWER_READY_PATTERN = /Prismarine viewer web server running on/;
+
+class GracefulShutdownError extends Error {
+  constructor(reason) {
+    super(`Graceful shutdown (${reason})`);
+    this.name = "GracefulShutdownError";
+  }
+}
 
 export function resolveWorldConfig(env = process.env) {
   const viewerPort = env.MINECRAFT_VIEWER_PORT && env.MINECRAFT_VIEWER_PORT.trim() !== ""
     ? env.MINECRAFT_VIEWER_PORT
-    : "0";
+    : "3000";
 
   return {
     brainPort: Number(env.RESIDENT_BRAIN_PORT ?? 8787),
@@ -298,7 +306,80 @@ export async function bootstrapWorld(options = {}) {
   });
   void paperExitBeforeReady;
 
-  await waitWithTimeout(paperReady, paperReadyTimeoutMs, "Paper server did not become ready in time.");
+  let botProcess;
+  let shuttingDown = false;
+  let shutdownReason = "shutdown";
+  let shutdownPromise;
+  const signalHandlers = [];
+
+  const shutdown = (reason = "shutdown") => {
+    if (shutdownPromise) {
+      return shutdownPromise;
+    }
+
+    shuttingDown = true;
+    shutdownReason = reason;
+    for (const { signal, handler } of signalHandlers) {
+      process.removeListener(signal, handler);
+    }
+
+    shutdownPromise = (async () => {
+      output.write(`[world] shutting down (${reason})\n`);
+      if (paperProcess.stdin && !paperProcess.stdin.destroyed) {
+        paperProcess.stdin.write("stop\n");
+        paperProcess.stdin.end();
+      }
+
+      killChild(brainProcess, "SIGINT");
+      if (botProcess) {
+        killChild(botProcess, "SIGINT");
+      }
+
+      const trackedChildren = [brainProcess, paperProcess, botProcess].filter(Boolean);
+      const waitForAll = Promise.allSettled(trackedChildren.map((child) => waitForChildExit(child)));
+      await Promise.race([waitForAll, delay(15_000)]);
+
+      killChild(paperProcess, "SIGTERM");
+      killChild(brainProcess, "SIGTERM");
+      if (botProcess) {
+        killChild(botProcess, "SIGTERM");
+      }
+
+      await Promise.race([waitForAll, delay(5_000)]);
+
+      killChild(paperProcess, "SIGKILL");
+      killChild(brainProcess, "SIGKILL");
+      if (botProcess) {
+        killChild(botProcess, "SIGKILL");
+      }
+
+      await waitForAll;
+    })();
+
+    return shutdownPromise;
+  };
+
+  if (installSignalHandlers) {
+    for (const signal of ["SIGINT", "SIGTERM"]) {
+      const handler = () => {
+        void shutdown(signal).then(() => {
+          process.exitCode = 0;
+        });
+      };
+      signalHandlers.push({ signal, handler });
+      process.on(signal, handler);
+    }
+  }
+
+  try {
+    await waitWithTimeout(paperReady, paperReadyTimeoutMs, "Paper server did not become ready in time.");
+  } catch (error) {
+    if (shuttingDown) {
+      await shutdownPromise;
+      throw new GracefulShutdownError(shutdownReason);
+    }
+    throw error;
+  }
 
   const botEnv = {
     ...childEnv,
@@ -313,14 +394,33 @@ export async function bootstrapWorld(options = {}) {
     botEnv.MINECRAFT_VIEWER_PORT = String(config.viewerPort);
   }
 
-  const botProcess = spawnLoggedProcess({
+  let viewerOpened = false;
+  botProcess = spawnLoggedProcess({
     name: "bot",
     command: process.execPath,
     args: [join(paths.rootDir, "bot", "dist", "index.js"), "run"],
     cwd: paths.rootDir,
     env: botEnv,
     spawnImpl,
-    output
+    output,
+    onLine(line) {
+      if (viewerOpened || !config.viewerPort || !VIEWER_READY_PATTERN.test(line)) {
+        return;
+      }
+
+      viewerOpened = true;
+      const viewerUrl = `http://127.0.0.1:${config.viewerPort}`;
+      const browserCommand = platform === "win32" ? "cmd" : platform === "darwin" ? "open" : "xdg-open";
+      const browserArgs = platform === "win32" ? ["/c", "start", "", viewerUrl] : [viewerUrl];
+      const browserProcess = spawnImpl(browserCommand, browserArgs, {
+        cwd: paths.rootDir,
+        env,
+        stdio: "ignore"
+      });
+
+      browserProcess.on?.("error", () => {});
+      browserProcess.unref?.();
+    }
   });
 
   const children = {
@@ -332,54 +432,6 @@ export async function bootstrapWorld(options = {}) {
   const exitPromises = Object.entries(children).map(([name, child]) =>
     waitForChildExit(child).then((result) => ({ name, ...result }))
   );
-
-  let shuttingDown = false;
-  const signalHandlers = [];
-
-  const shutdown = async (reason = "shutdown") => {
-    if (shuttingDown) {
-      return;
-    }
-
-    shuttingDown = true;
-    for (const { signal, handler } of signalHandlers) {
-      process.removeListener(signal, handler);
-    }
-
-    output.write(`[world] shutting down (${reason})\n`);
-    if (paperProcess.stdin && !paperProcess.stdin.destroyed) {
-      paperProcess.stdin.write("stop\n");
-      paperProcess.stdin.end();
-    }
-
-    killChild(brainProcess, "SIGINT");
-    killChild(botProcess, "SIGINT");
-
-    const waitForAll = Promise.allSettled(exitPromises);
-    await Promise.race([waitForAll, delay(15_000)]);
-
-    killChild(paperProcess, "SIGTERM");
-    killChild(brainProcess, "SIGTERM");
-    killChild(botProcess, "SIGTERM");
-
-    await Promise.race([waitForAll, delay(5_000)]);
-
-    killChild(paperProcess, "SIGKILL");
-    killChild(brainProcess, "SIGKILL");
-    killChild(botProcess, "SIGKILL");
-
-    await waitForAll;
-  };
-
-  if (installSignalHandlers) {
-    for (const signal of ["SIGINT", "SIGTERM"]) {
-      const handler = () => {
-        void shutdown(signal);
-      };
-      signalHandlers.push({ signal, handler });
-      process.on(signal, handler);
-    }
-  }
 
   const completionPromise = Promise.race(exitPromises).then(async (firstExit) => {
     if (!shuttingDown) {
@@ -558,6 +610,10 @@ function defaultGradleCommand(platform) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
+    if (error instanceof GracefulShutdownError) {
+      process.exitCode = 0;
+      return;
+    }
     process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     process.exitCode = 1;
   });

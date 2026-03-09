@@ -110,7 +110,7 @@ It reuses the existing environment variables for the stack:
 - `MINECRAFT_VIEWER_PORT`
 - `RESIDENT_BRAIN_PORT`
 
-The full-stack launcher leaves the bot viewer disabled unless `MINECRAFT_VIEWER_PORT` is set explicitly, for example `MINECRAFT_VIEWER_PORT=3000 npm run world`.
+The full-stack launcher serves the bot viewer at [http://localhost:3000](http://localhost:3000) by default and opens it in your browser once the viewer is ready. Set `MINECRAFT_VIEWER_PORT` to override that port.
 
 The launcher manages the local EULA acceptance file automatically for this development workflow.
 
