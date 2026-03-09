@@ -7,6 +7,7 @@ import {
   ValueProfile
 } from "@resident/shared";
 import { DEFAULT_VALUE_PROFILE } from "@resident/shared";
+import type { LongTermMemoryArchive } from "../memory/recall";
 
 export interface SleepStoreData {
   bundles: MemoryBundle[];
@@ -16,7 +17,7 @@ export interface SleepStoreData {
   salience: Record<string, number>;
 }
 
-export class FileBackedSleepStore {
+export class FileBackedSleepStore implements LongTermMemoryArchive {
   constructor(private readonly filePath: string) {}
 
   async load(): Promise<SleepStoreData> {
@@ -37,5 +38,10 @@ export class FileBackedSleepStore {
   async save(data: SleepStoreData): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
     await writeFile(this.filePath, JSON.stringify(data, null, 2));
+  }
+
+  async loadConsolidations(): Promise<ConsolidationRecord[]> {
+    const data = await this.load();
+    return data.consolidations;
   }
 }

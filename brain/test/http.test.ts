@@ -8,7 +8,7 @@ import { FileBackedMemoryStore } from "../src/memory/file-store";
 import { MemoryManager } from "../src/memory/memory-manager";
 import { createResidentBrainServer } from "../src/server/http";
 import { FileBackedSleepStore } from "../src/sleep/file-store";
-import { SleepCore } from "../src/sleep/sleep-core";
+import { SleepConsolidator, SleepCore } from "../src/sleep/sleep-core";
 
 const defaultOutcome: DailyOutcome = {
   dayNumber: 0,
@@ -154,9 +154,13 @@ describe("createResidentBrainServer", () => {
     expect(record.overnight.value_shift_summary.some((entry) => entry.includes("cozy home"))).toBe(true);
   });
 
-  it("queues sleep work in awake memory when consolidation fails", async () => {
-    const { port, memory, sleepCore } = await createHarness(cleanups);
-    vi.spyOn(sleepCore, "consolidate").mockRejectedValueOnce(new Error("sleep-core offline"));
+  it("queues sleep work in awake memory when model-backed consolidation fails", async () => {
+    const { port, memory } = await createHarness(cleanups, {
+      modelName: "sleep-test",
+      synthesize: vi.fn(async () => {
+        throw new Error("model offline");
+      })
+    });
 
     const observationResponse = await fetch(`http://127.0.0.1:${port}/memory/observations`, {
       method: "POST",
@@ -188,14 +192,16 @@ describe("createResidentBrainServer", () => {
     expect(response.status).toBe(202);
     const pending = await memory.pendingSleepWork();
     expect(pending).toHaveLength(1);
-    expect(pending[0]?.last_error).toContain("sleep-core offline");
+    expect(pending[0]?.last_error).toContain("Sleep consolidation failed.");
+    expect(pending[0]?.last_error).toContain("sleep-test");
   });
 });
 
-async function createHarness(cleanups: Array<() => Promise<void>>) {
+async function createHarness(cleanups: Array<() => Promise<void>>, consolidator: SleepConsolidator = createHarnessConsolidator()) {
   const dir = await mkdtemp(join(tmpdir(), "resident-brain-http-"));
-  const memory = new MemoryManager(new FileBackedMemoryStore(join(dir, "memory.json")));
-  const sleepCore = new SleepCore(new FileBackedSleepStore(join(dir, "sleep.json")));
+  const sleepStore = new FileBackedSleepStore(join(dir, "sleep.json"));
+  const memory = new MemoryManager(new FileBackedMemoryStore(join(dir, "memory.json")), sleepStore);
+  const sleepCore = new SleepCore(sleepStore, consolidator);
   const server = createResidentBrainServer(memory, sleepCore, 0);
   const port = (server.address() as AddressInfo).port;
 
@@ -219,5 +225,19 @@ async function createHarness(cleanups: Array<() => Promise<void>>) {
       expect(response.status).toBe(202);
       return response.json();
     }
+  };
+}
+
+function createHarnessConsolidator(): SleepConsolidator {
+  return {
+    modelName: "sleep-test",
+    synthesize: vi.fn(async () => ({
+      summary: "A warm night gave the day a shape worth keeping.",
+      insights: ["Protect the cozy doorway tomorrow."],
+      risk_themes: ["Hostiles near the tree line."],
+      place_memories: ["home"],
+      project_memories: ["Doorway Repair: Keep the entrance dry and bright."],
+      creative_motifs: ["The doorway looked warm in the rain."]
+    }))
   };
 }

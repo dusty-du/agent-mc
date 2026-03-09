@@ -7,9 +7,12 @@ import {
   OvernightConsolidation,
   PerceptionFrame,
   ProtectedArea,
+  RecallQuery,
+  RecallResult,
   WakeOrientation
 } from "@resident/shared";
 import { FileBackedMemoryStore, PendingSleepWork } from "./file-store";
+import { LongTermMemoryArchive, recallFromMemory } from "./recall";
 import {
   applyWakeOrientation,
   buildMemoryBundle,
@@ -21,7 +24,10 @@ import {
 } from "./memory-state";
 
 export class MemoryManager {
-  constructor(private readonly store: FileBackedMemoryStore) {}
+  constructor(
+    private readonly store: FileBackedMemoryStore,
+    private readonly longTermArchive: LongTermMemoryArchive
+  ) {}
 
   async current(): Promise<MemoryState> {
     const data = await this.store.load();
@@ -80,6 +86,12 @@ export class MemoryManager {
   async buildBundle(agentId: string): Promise<MemoryBundle> {
     const data = await this.store.load();
     return buildMemoryBundle(data.memory, agentId);
+  }
+
+  async recall(query: RecallQuery): Promise<RecallResult> {
+    const data = await this.store.load();
+    const consolidations = await this.longTermArchive.loadConsolidations();
+    return recallFromMemory(data.memory, consolidations, query);
   }
 
   async queueSleepWork(bundle: MemoryBundle, outcome: DailyOutcome, lastError?: string): Promise<PendingSleepWork> {

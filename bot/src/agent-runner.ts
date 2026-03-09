@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createOpenAIExecutivePlannerFromEnv,
+  createOpenAISleepConsolidatorFromEnv,
   createResidentBrainServer,
   FileBackedMemoryStore,
   FileBackedSleepStore,
@@ -52,12 +53,14 @@ export class ResidentAgentRunner {
     this.intervalMs = config.intervalMs ?? Number(process.env.RESIDENT_LOOP_MS ?? 4000);
     this.serveBrain = config.serveBrain ?? true;
     this.brainPort = config.brainPort ?? Number(process.env.RESIDENT_BRAIN_PORT ?? 8787);
+    const sleepStore = new FileBackedSleepStore(
+      config.sleepStorePath ?? process.env.RESIDENT_SLEEP_STORE ?? `${process.cwd()}/brain/.resident-data/sleep-core.json`
+    );
     this.memory = new MemoryManager(
-      new FileBackedMemoryStore(config.memoryStorePath ?? process.env.RESIDENT_MEMORY_STORE ?? `${process.cwd()}/brain/.resident-data/memory.json`)
+      new FileBackedMemoryStore(config.memoryStorePath ?? process.env.RESIDENT_MEMORY_STORE ?? `${process.cwd()}/brain/.resident-data/memory.json`),
+      sleepStore
     );
-    this.sleepCore = new SleepCore(
-      new FileBackedSleepStore(config.sleepStorePath ?? process.env.RESIDENT_SLEEP_STORE ?? `${process.cwd()}/brain/.resident-data/sleep-core.json`)
-    );
+    this.sleepCore = new SleepCore(sleepStore, createOpenAISleepConsolidatorFromEnv());
   }
 
   async run(): Promise<void> {
@@ -105,7 +108,7 @@ export class ResidentAgentRunner {
           place: decision.recallQuery.place,
           project: decision.recallQuery.project_id
         });
-        const recall = await this.sleepCore.recall(decision.recallQuery);
+        const recall = await this.memory.recall(decision.recallQuery);
         const best = recall.matches[0];
         if (best) {
           await this.memory.remember({

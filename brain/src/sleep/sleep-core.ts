@@ -4,59 +4,68 @@ import {
   DailyOutcome,
   MemoryBundle,
   OvernightConsolidation,
-  RecallQuery,
-  RecallResult,
   ValueProfile,
   updateValueProfile
 } from "@resident/shared";
 import { FileBackedSleepStore, SleepStoreData } from "./file-store";
 
-function summarizeBundle(bundle: MemoryBundle): string {
-  const categories = bundle.observations.reduce<Record<string, number>>((acc, observation) => {
-    acc[observation.category] = (acc[observation.category] ?? 0) + 1;
-    return acc;
-  }, {});
-  const summaryBits = Object.entries(categories).map(([category, count]) => `${count} ${category}`);
-  return summaryBits.length > 0 ? `The day held ${summaryBits.join(", ")}.` : bundle.summary;
+export interface SleepConsolidationInput {
+  bundle: MemoryBundle;
+  outcome: DailyOutcome;
+  recentCultureSignals: CultureSignal[];
+  recentConsolidations: ConsolidationRecord[];
 }
 
-function topTags(bundle: MemoryBundle): string[] {
-  const counts = new Map<string, number>();
-  for (const observation of bundle.observations) {
-    for (const tag of observation.tags) {
-      counts.set(tag, (counts.get(tag) ?? 0) + observation.importance);
-    }
+export interface SleepConsolidationResult {
+  summary: string;
+  insights: string[];
+  risk_themes: string[];
+  place_memories: string[];
+  project_memories: string[];
+  creative_motifs: string[];
+}
+
+export interface SleepConsolidator {
+  readonly modelName: string;
+  synthesize(input: SleepConsolidationInput): Promise<SleepConsolidationResult>;
+}
+
+export class SleepConsolidationError extends Error {
+  constructor(
+    message: string,
+    public readonly model?: string,
+    public readonly cause?: unknown
+  ) {
+    super(model ? `${message} [model=${model}]` : message);
+    this.name = "SleepConsolidationError";
   }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 6)
-    .map(([tag]) => tag);
 }
 
-function buildOvernightConsolidation(bundle: MemoryBundle, insights: string[], data: SleepStoreData): OvernightConsolidation {
-  const riskThemes = bundle.recent_dangers.slice(-4);
-  const projectMemories = bundle.active_projects.slice(-4).map((project) => `${project.title}: ${project.summary}`);
-  const placeMemories = bundle.place_tags.slice(-5);
+function buildOvernightConsolidation(
+  bundle: MemoryBundle,
+  synthesis: SleepConsolidationResult,
+  data: SleepStoreData
+): OvernightConsolidation {
   const recentSignals = data.cultureSignals.slice(-5).map((signal) => `${signal.topic}: ${signal.notes ?? signal.signal_type}`);
   return {
     day_number: bundle.day_number,
     created_at: new Date().toISOString(),
-    summary: summarizeBundle(bundle),
-    insights,
+    summary: synthesis.summary,
+    insights: synthesis.insights,
     carry_over_commitments: bundle.carry_over_commitments.slice(-6),
-    risk_themes: riskThemes,
-    place_memories: placeMemories,
-    project_memories: projectMemories,
+    risk_themes: synthesis.risk_themes,
+    place_memories: synthesis.place_memories,
+    project_memories: synthesis.project_memories,
     value_shift_summary: recentSignals,
-    creative_motifs: bundle.observations
-      .filter((observation) => observation.tags.includes("beauty") || observation.tags.includes("home"))
-      .slice(-3)
-      .map((observation) => observation.summary)
+    creative_motifs: synthesis.creative_motifs
   };
 }
 
 export class SleepCore {
-  constructor(private readonly store: FileBackedSleepStore) {}
+  constructor(
+    private readonly store: FileBackedSleepStore,
+    private readonly consolidator: SleepConsolidator
+  ) {}
 
   async ingestCultureSignal(signal: CultureSignal): Promise<void> {
     const data = await this.store.load();
@@ -74,14 +83,13 @@ export class SleepCore {
       0.25
     );
 
-    const tags = topTags(bundle);
-    const insights = this.makeInsights(bundle, tags, outcome);
-    const overnight = buildOvernightConsolidation(bundle, insights, data);
+    const synthesis = await this.buildModelSynthesis(bundle, outcome, data);
+    const overnight = buildOvernightConsolidation(bundle, synthesis, data);
     const record: ConsolidationRecord = {
       dayNumber: bundle.day_number,
       createdAt: overnight.created_at,
       summary: overnight.summary,
-      insights,
+      insights: synthesis.insights,
       linkedObservationTimestamps: bundle.observations.map((observation) => observation.timestamp),
       overnight
     };
@@ -106,75 +114,27 @@ export class SleepCore {
     return data.valueProfile;
   }
 
-  async recall(query: RecallQuery): Promise<RecallResult> {
-    const data = await this.store.load();
-    const haystack = data.consolidations.flatMap((record) =>
-      record.overnight.project_memories
-        .concat(record.overnight.place_memories)
-        .concat(record.overnight.insights)
-        .concat(record.overnight.creative_motifs)
-        .map((summary) => ({
-          timestamp: record.createdAt,
-          summary,
-          tags: [
-            ...record.overnight.place_memories,
-            ...record.overnight.risk_themes,
-            ...record.overnight.carry_over_commitments,
-            ...record.overnight.project_memories
-          ]
-        }))
-    );
-    const normalizedQuery = query.query.toLowerCase();
-    const semanticHints = [
-      ...(query.tags ?? []),
-      ...(query.place ? [query.place] : []),
-      ...(query.entity ? [query.entity] : []),
-      ...(query.project_id ? [query.project_id] : []),
-      ...(query.mood ? [query.mood] : [])
-    ];
-    const matches = haystack
-      .map((entry) => ({
-        ...entry,
-        relevance: scoreMatch(entry.summary, normalizedQuery, semanticHints, entry.tags)
-      }))
-      .filter((entry) => entry.relevance > 0)
-      .sort((a, b) => b.relevance - a.relevance)
-      .slice(0, query.limit ?? 5)
-      .map(({ timestamp, summary, tags, relevance }) => ({ timestamp, summary, tags, relevance }));
-
-    return {
-      query,
-      matches
-    };
-  }
-
-  private makeInsights(bundle: MemoryBundle, tags: string[], outcome: DailyOutcome): string[] {
-    const insights: string[] = [];
-
-    if (bundle.recent_dangers.length > 0 || outcome.damageTaken > 6) {
-      insights.push("Keep exits, food, and shelter close when danger gathers.");
-    }
-    if (outcome.hungerEmergencies > 0) {
-      insights.push("Protect tomorrow by stabilizing food before ambitious travel.");
-    }
-    if (!outcome.survived || (outcome.setbacksFaced ?? 0) > 0) {
-      insights.push("Failure can still belong to a good life if it is understood and tried again.");
-    }
-    if (outcome.hostedPlayers > 0 || bundle.recent_interactions.length > 0) {
-      insights.push("Make room for warmth, welcome, and shared spaces.");
-    }
-    if ((outcome.meaningMoments ?? 0) > 0 || (outcome.recoveryMoments ?? 0) > 0) {
-      insights.push("Meaning and recovery matter as much as success.");
-    }
-
-    for (const tag of tags) {
-      if (insights.length >= 6) {
-        break;
+  private async buildModelSynthesis(
+    bundle: MemoryBundle,
+    outcome: DailyOutcome,
+    data: SleepStoreData
+  ): Promise<SleepConsolidationResult> {
+    try {
+      return normalizeSleepConsolidationResult(
+        await this.consolidator.synthesize({
+          bundle,
+          outcome,
+          recentCultureSignals: data.cultureSignals.slice(-5),
+          recentConsolidations: data.consolidations.slice(-3)
+        }),
+        this.consolidator.modelName
+      );
+    } catch (error) {
+      if (error instanceof SleepConsolidationError) {
+        throw error;
       }
-      insights.push(`Remember ${tag} when choosing what feels worth doing next.`);
+      throw new SleepConsolidationError("Sleep consolidation failed.", this.consolidator.modelName, error);
     }
-
-    return [...new Set(insights)].slice(0, 6);
   }
 
   private bumpSalience(data: SleepStoreData, tags: string[], amount: number): void {
@@ -185,26 +145,30 @@ export class SleepCore {
   }
 }
 
-function scoreMatch(summary: string, query: string, hints: string[], entryTags: string[]): number {
-  const normalizedSummary = summary.toLowerCase();
-  const normalizedTags = entryTags.map((tag) => tag.toLowerCase());
-  let score = 0;
-  if (normalizedSummary.includes(query)) {
-    score += 1;
+function normalizeSleepConsolidationResult(
+  result: SleepConsolidationResult,
+  model?: string
+): SleepConsolidationResult {
+  return {
+    summary: normalizeString(result.summary, "summary", model),
+    insights: normalizeStringArray(result.insights, 6, "insights", model),
+    risk_themes: normalizeStringArray(result.risk_themes, 4, "risk_themes", model),
+    place_memories: normalizeStringArray(result.place_memories, 5, "place_memories", model),
+    project_memories: normalizeStringArray(result.project_memories, 4, "project_memories", model),
+    creative_motifs: normalizeStringArray(result.creative_motifs, 3, "creative_motifs", model)
+  };
+}
+
+function normalizeString(value: unknown, field: string, model?: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new SleepConsolidationError(`Sleep consolidation field "${field}" must be a non-empty string.`, model);
   }
-  for (const hint of hints) {
-    const normalizedHint = hint.toLowerCase();
-    if (normalizedSummary.includes(normalizedHint)) {
-      score += 0.5;
-    }
-    if (normalizedTags.some((tag) => tag.includes(normalizedHint))) {
-      score += 0.35;
-    }
+  return value.trim();
+}
+
+function normalizeStringArray(value: unknown, max: number, field: string, model?: string): string[] {
+  if (!Array.isArray(value)) {
+    throw new SleepConsolidationError(`Sleep consolidation field "${field}" must be an array.`, model);
   }
-  for (const tag of normalizedTags) {
-    if (query.includes(tag)) {
-      score += 0.2;
-    }
-  }
-  return score;
+  return [...new Set(value.map((entry) => normalizeString(entry, field, model)).filter(Boolean))].slice(0, max);
 }

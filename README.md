@@ -13,7 +13,7 @@ An implementation scaffold for an autonomous Minecraft resident with:
 - A wake-brain that performs wake orientation, classifies replanning triggers, and prioritizes hunger, danger, nightly sleep, crafting, and free building/rebuilding.
 - An optional OpenAI executive layer that can choose non-urgent life directions while deterministic safety rules still guard danger, hunger, and sleep.
 - A unified awake memory layer that tracks world facts, current goals, recent observations, self-narrative, and end-of-day memory bundles.
-- A sleep-core service with a file-backed store, nightly consolidation, long-term recall, and value updates.
+- A sleep-core service with a file-backed store, dedicated-model nightly consolidation, long-term recall, and value updates.
 - Graceful degradation for sleep failures: awake memory can queue unfinished sleep bundles for later replay instead of losing the day.
 - A semantic build planner for open-ended construction and remodeling.
 - A recipe-driven craft planner using `minecraft-data`.
@@ -86,8 +86,10 @@ Useful environment variables:
 - `RESIDENT_LOOP_MS`
 - `OPENAI_API_KEY`
 - `RESIDENT_OPENAI_MODEL`
+- `RESIDENT_SLEEP_OPENAI_MODEL`
 
 If `OPENAI_API_KEY` is absent, the resident falls back to the deterministic wake-brain executive.
+`RESIDENT_SLEEP_OPENAI_MODEL` is required for sleep-core startup. Overnight sleep consolidation always uses that separate model while recall stays deterministic and memory-owned. The sleep model reuses `OPENAI_API_KEY` and `RESIDENT_OPENAI_BASE_URL`.
 
 Set `MINECRAFT_VIEWER_PORT` to override the default viewer port.
 
@@ -126,8 +128,8 @@ Set the resident account name in [`config.yml`](plugin/src/main/resources/config
 
 ## Notes
 
-- Awake `memory` owns live world facts, short-horizon continuity, and the end-of-day `MemoryBundle`.
-- `sleep-core` only runs sleep-time consolidation and long-term autobiographical integration; wake orientation is produced by the awake brain after reading the morning world state.
+- Awake `memory` owns live world facts, short-horizon continuity, daytime recall, and the end-of-day `MemoryBundle`.
+- `sleep-core` only runs sleep-time consolidation and long-term autobiographical integration, and it requires its own configured model; wake orientation is produced by the awake brain after reading the morning world state.
 - The resident is designed around bounded flourishing rather than reward maximization, and happiness is allowed to survive failure.
 - The runner emits structured JSON logs for planning turns, recall, action execution, memory handoff, consolidation, and value updates.
 - ALMA is intentionally out of scope here.
