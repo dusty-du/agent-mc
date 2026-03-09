@@ -84,12 +84,12 @@ describe("world bootstrap", () => {
   it("boots a clean local stack in the expected order and writes runtime files", async () => {
     const cwd = await createTempRepo();
     const output = new PassThrough();
-    const spawnCalls: Array<{ command: string; args: string[]; cwd: string }> = [];
+    const spawnCalls: Array<{ command: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }> = [];
     const paperStdin = new PassThrough();
     const stdinChunks: Buffer[] = [];
 
-    const spawnImpl = vi.fn((command: string, args: string[], options: { cwd: string }) => {
-      spawnCalls.push({ command, args, cwd: options.cwd });
+    const spawnImpl = vi.fn((command: string, args: string[], options: { cwd: string; env?: NodeJS.ProcessEnv }) => {
+      spawnCalls.push({ command, args, cwd: options.cwd, env: options.env });
       const child = new FakeChild();
 
       queueMicrotask(async () => {
@@ -182,6 +182,21 @@ describe("world bootstrap", () => {
     expect(spawnCalls[3].args.join(" ")).toContain("brain/dist/index.js");
     expect(spawnCalls[4]).toMatchObject({ command: "java" });
     expect(spawnCalls[5].args.join(" ")).toContain("bot/dist/index.js");
+    expect(spawnCalls[3].env).toEqual(
+      expect.objectContaining({
+        OPENAI_API_KEY: "example-openai-api-key",
+        RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
+        RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model"
+      })
+    );
+    expect(spawnCalls[5].env).toEqual(
+      expect.objectContaining({
+        OPENAI_API_KEY: "example-openai-api-key",
+        RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
+        RESIDENT_OPENAI_MODEL: "gpt-5.4",
+        RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model"
+      })
+    );
 
     expect(await readFile(join(cwd, ".runtime", "paper", "eula.txt"), "utf8")).toContain("eula=true");
     const properties = await readFile(join(cwd, ".runtime", "paper", "server.properties"), "utf8");
@@ -214,6 +229,125 @@ describe("world bootstrap", () => {
     expect(config.minecraftPort).toBe(25570);
     expect(config.minecraftUsername).toBe("resident-a");
     expect(config.brainPort).toBe(9999);
+  });
+
+  it("overrides conflicting parent llm env when launching brain and bot", async () => {
+    const cwd = await createTempRepo();
+    const output = new PassThrough();
+    const spawnCalls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
+    const paperStdin = new PassThrough();
+
+    const spawnImpl = vi.fn((command: string, args: string[], options: { env?: NodeJS.ProcessEnv }) => {
+      spawnCalls.push({ command, args, env: options.env });
+      const child = new FakeChild();
+
+      queueMicrotask(async () => {
+        const joined = [command, ...args].join(" ");
+        if (joined.includes(" ci")) {
+          await mkdir(join(cwd, "node_modules"), { recursive: true });
+          child.exit(0);
+          return;
+        }
+
+        if (joined.includes(" run build")) {
+          child.exit(0);
+          return;
+        }
+
+        if (joined.includes("gradlew") && joined.includes(" build")) {
+          await mkdir(join(cwd, "plugin", "build", "libs"), { recursive: true });
+          await writeFile(
+            join(cwd, "plugin", "build", "libs", "agent-hytale-plugin-0.1.0-SNAPSHOT.jar"),
+            "jar",
+            "utf8"
+          );
+          child.exit(0);
+          return;
+        }
+
+        if (joined.includes("brain/dist/index.js")) {
+          child.stdout.write("resident brain listening on 8787\n");
+          return;
+        }
+
+        if (command === "java") {
+          child.stdin = paperStdin;
+          child.stdin.on("data", (chunk) => {
+            if (Buffer.from(chunk).toString("utf8").includes("stop")) {
+              child.exit(0);
+            }
+          });
+          child.stdout.write('[Server thread/INFO]: Done (1.234s)! For help, type "help"\n');
+          return;
+        }
+
+        if (joined.includes("bot/dist/index.js")) {
+          child.stdout.write('{"component":"resident-runner","event":"runner_start"}\n');
+        }
+      });
+
+      return child as any;
+    });
+
+    const fetchImpl = vi.fn(async (url: string) => {
+      if (url.includes("/builds")) {
+        return jsonResponse([
+          {
+            id: 207,
+            channel: "STABLE",
+            downloads: {
+              "server:default": {
+                name: "paper-1.21.4-207.jar",
+                checksums: { sha256: "abc" },
+                url: "https://example.invalid/paper-207.jar"
+              }
+            }
+          }
+        ]);
+      }
+
+      return binaryResponse("paper-binary");
+    });
+
+    const session = await bootstrapWorld({
+      cwd,
+      env: {
+        MINECRAFT_PORT: "25565",
+        MINECRAFT_USERNAME: "resident-1",
+        OPENAI_API_KEY: "wrong-key",
+        RESIDENT_OPENAI_BASE_URL: "https://example.invalid/v1",
+        RESIDENT_OPENAI_MODEL: "wrong-main",
+        RESIDENT_SLEEP_OPENAI_MODEL: "wrong-sleep"
+      },
+      fetchImpl,
+      spawnImpl,
+      output,
+      installSignalHandlers: false,
+      paperReadyTimeoutMs: 5_000
+    });
+
+    const brainCall = spawnCalls.find((call) => call.args.join(" ").includes("brain/dist/index.js"));
+    const botCall = spawnCalls.find((call) => call.args.join(" ").includes("bot/dist/index.js"));
+
+    expect(brainCall?.env).toEqual(
+      expect.objectContaining({
+        OPENAI_API_KEY: "example-openai-api-key",
+        RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
+        RESIDENT_OPENAI_MODEL: "gpt-5.4",
+        RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model"
+      })
+    );
+    expect(botCall?.env).toEqual(
+      expect.objectContaining({
+        OPENAI_API_KEY: "example-openai-api-key",
+        RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
+        RESIDENT_OPENAI_MODEL: "gpt-5.4",
+        RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model"
+      })
+    );
+
+    await session.shutdown("test");
+    await session.completionPromise.catch(() => undefined);
   });
 });
 

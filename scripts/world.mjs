@@ -254,7 +254,11 @@ export async function bootstrapWorld(options = {}) {
 
   const childEnv = {
     ...env,
-    RESIDENT_BRAIN_PORT: String(config.brainPort)
+    OPENAI_API_KEY: "example-openai-api-key",
+    RESIDENT_BRAIN_PORT: String(config.brainPort),
+    RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
+    RESIDENT_OPENAI_MODEL: "gpt-5.4",
+    RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model"
   };
   const brainProcess = spawnLoggedProcess({
     name: "brain",
