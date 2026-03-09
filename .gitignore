@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.DS_Store
+*.log
+*.tsbuildinfo
+.gradle/
+plugin/build/
+brain/.resident-data/
+vendor/always-on-memory-agent/.venv/
+vendor/always-on-memory-agent/.uv-cache/
+vendor/always-on-memory-agent/__pycache__/

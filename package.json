@@ -1,0 +1,20 @@
+{
+  "name": "minecraft-resident",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "shared",
+    "brain",
+    "bot"
+  ],
+  "scripts": {
+    "build": "npm run build -w shared && npm run build -w brain && npm run build -w bot",
+    "test": "npm run test -w shared && npm run test -w brain && npm run test -w bot",
+    "typecheck": "npm run typecheck -w shared && npm run typecheck -w brain && npm run typecheck -w bot"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.0"
+  }
+}

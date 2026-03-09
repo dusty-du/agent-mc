@@ -1,0 +1,10 @@
+brain:
+  endpoint: "https://brain.example.invalid/brain/events"
+  connect-timeout-ms: 2000
+  request-timeout-ms: 5000
+  auth-token: ""
+  server-name: "agent-hytale-local"
+  player-chat-radius: 48
+resident:
+  username: "your-resident-name"
+protected-areas: {}

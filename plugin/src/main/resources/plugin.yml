@@ -1,0 +1,36 @@
+name: ResidentBridge
+version: ${version}
+main: io.agentmc.resident.ResidentPlugin
+api-version: "1.21"
+description: Minimal Paper bridge that sends resident state and feedback to a local brain service.
+authors:
+  - agent-mc contributors
+commands:
+  residentstatus:
+    description: Post the current resident status to the local brain endpoint.
+    usage: "/residentstatus <status...>"
+    aliases:
+      - rstatus
+    permission: resident.status
+  residentfeedback:
+    description: Post player feedback to the local brain endpoint.
+    usage: "/residentfeedback <message...>"
+    aliases:
+      - rfeedback
+    permission: resident.feedback
+  residentprotect:
+    description: Manage protected areas that the resident may not alter.
+    usage: "/residentprotect <add|remove|list> ..."
+    aliases:
+      - rprotect
+    permission: resident.protect
+permissions:
+  resident.status:
+    description: Allows a sender to post resident status updates.
+    default: true
+  resident.feedback:
+    description: Allows a sender to post player feedback.
+    default: true
+  resident.protect:
+    description: Allows a sender to manage resident protected areas.
+    default: op

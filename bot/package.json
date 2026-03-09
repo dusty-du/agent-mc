@@ -1,0 +1,19 @@
+{
+  "name": "@resident/bot",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@resident/brain": "file:../brain",
+    "@resident/shared": "file:../shared",
+    "mineflayer": "^4.20.1",
+    "mineflayer-collectblock": "^1.6.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "prismarine-viewer": "^1.28.0"
+  }
+}
