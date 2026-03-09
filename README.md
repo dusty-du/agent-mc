@@ -28,8 +28,11 @@ An implementation scaffold for an autonomous Minecraft resident with:
 npm install
 npm test
 npm run build
-gradle -p plugin build
+npm run world
+./plugin/gradlew build
 ```
+
+`npm run world` bootstraps the full local stack. It builds the JS workspaces, builds the Paper plugin, downloads the latest stable Paper `1.21.4` server jar, writes the local Paper runtime under `.runtime/`, accepts the Minecraft EULA for this local bootstrap, generates a fresh world on first run, and starts the brain, server, and resident together in the foreground.
 
 ## Brain Server
 
@@ -69,6 +72,8 @@ Start the autonomous resident loop:
 node bot/dist/index.js run
 ```
 
+The resident viewer is served in third-person at [http://localhost:3000](http://localhost:3000) by default while the bot is running.
+
 Useful environment variables:
 
 - `MINECRAFT_HOST`
@@ -83,6 +88,29 @@ Useful environment variables:
 - `RESIDENT_OPENAI_MODEL`
 
 If `OPENAI_API_KEY` is absent, the resident falls back to the deterministic wake-brain executive.
+
+Set `MINECRAFT_VIEWER_PORT` to override the default viewer port.
+
+## Local World Bootstrap
+
+The one-command local world runner keeps generated runtime state under `.runtime/`:
+
+- `.runtime/paper/paper-server.jar`
+- `.runtime/paper/plugins/ResidentBridge.jar`
+- `.runtime/paper/eula.txt`
+- `.runtime/paper/server.properties`
+- `.runtime/paper/world/` and the rest of the Paper server data
+
+It reuses the existing environment variables for the stack:
+
+- `MINECRAFT_PORT`
+- `MINECRAFT_USERNAME`
+- `MINECRAFT_VIEWER_PORT`
+- `RESIDENT_BRAIN_PORT`
+
+The full-stack launcher leaves the bot viewer disabled unless `MINECRAFT_VIEWER_PORT` is set explicitly, for example `MINECRAFT_VIEWER_PORT=3000 npm run world`.
+
+The launcher manages the local EULA acceptance file automatically for this development workflow.
 
 ## Protected Areas
 

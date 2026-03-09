@@ -9,8 +9,9 @@
   ],
   "scripts": {
     "build": "npm run build -w shared && npm run build -w brain && npm run build -w bot",
-    "test": "npm run test -w shared && npm run test -w brain && npm run test -w bot",
-    "typecheck": "npm run typecheck -w shared && npm run typecheck -w brain && npm run typecheck -w bot"
+    "test": "vitest run && npm run test -w shared && npm run test -w brain && npm run test -w bot",
+    "typecheck": "npm run typecheck -w shared && npm run typecheck -w brain && npm run typecheck -w bot",
+    "world": "node scripts/world.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

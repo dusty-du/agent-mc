@@ -10,3 +10,4 @@ brain/.resident-data/
 vendor/always-on-memory-agent/.venv/
 vendor/always-on-memory-agent/.uv-cache/
 vendor/always-on-memory-agent/__pycache__/
+.runtime/

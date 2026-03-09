@@ -35,20 +35,20 @@ export class LiveMineflayerDriver {
 
     const pathfinderModule = require("mineflayer-pathfinder");
     const collectBlockModule = require("mineflayer-collectblock");
-    const viewerModule = require("prismarine-viewer");
 
     bot.loadPlugin(pathfinderModule.pathfinder);
     bot.loadPlugin(collectBlockModule.plugin);
     this.GoalNear = pathfinderModule.goals.GoalNear as GoalNearCtor;
 
+    await onceSpawn(bot);
+
     if (this.config.viewerPort) {
+      const viewerModule = require("prismarine-viewer");
       viewerModule.mineflayer(bot, {
         port: this.config.viewerPort,
         firstPerson: false
       });
     }
-
-    await onceSpawn(bot);
     this.bot = bot;
     return bot;
   }
