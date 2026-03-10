@@ -75,8 +75,10 @@ export class ResidentAgentRunner {
     let previousPerception = (await this.runtime.tick()).perception;
     await this.memory.syncPerception(previousPerception, latestOvernight);
     ({ latestOvernight, values } = await this.flushPendingSleepWork(latestOvernight, values));
+    const initialMemory = await this.memory.current();
     residentLog("runner_start", {
       agent: previousPerception.agent_id,
+      selfName: initialMemory.self_name,
       position: previousPerception.position,
       brainPort: this.brainPort,
       serveBrain: this.serveBrain
@@ -445,6 +447,8 @@ function mergeMemoryState(primary: MemoryState, latest: MemoryState): MemoryStat
       motifs: { ...primary.personality_profile.motifs },
       style_tags: [...primary.personality_profile.style_tags]
     },
+    self_name: primary.self_name ?? latest.self_name,
+    self_name_chosen_at: primary.self_name_chosen_at ?? latest.self_name_chosen_at,
     need_state: { ...primary.need_state },
     mind_state: { ...primary.mind_state },
     bootstrap_progress: { ...primary.bootstrap_progress },

@@ -2,6 +2,14 @@ import { CultureSignal, DailyOutcome, ResidentMotif, ResidentPersonalityProfile,
 import { clamp } from "./defaults";
 
 const MOTIFS: ResidentMotif[] = ["homesteader", "wanderer", "caretaker", "tinkerer", "sentinel", "host"];
+const NAME_POOLS: Record<ResidentMotif, string[]> = {
+  homesteader: ["Hazel", "Rowan", "Alden", "Clover", "Nell", "Bram", "Willa", "Milo"],
+  wanderer: ["Vale", "Wren", "Arden", "Lyra", "Kestrel", "Nova", "Orin", "Pax"],
+  caretaker: ["Juniper", "Mira", "Sage", "Lina", "Anwen", "Oren", "Lark", "Nia"],
+  tinkerer: ["Piper", "Quill", "Remy", "Tobin", "Maren", "Otis", "Vera", "Nico"],
+  sentinel: ["Cairn", "Rook", "Bryn", "Sable", "Corin", "Tess", "Aster", "Thane"],
+  host: ["Avery", "Nora", "Felix", "Rosie", "Theo", "Mina", "Ellis", "Jonah"]
+};
 
 export function createResidentPersonality(seed = randomSeed()): ResidentPersonalityProfile {
   const random = seededRandom(seed);
@@ -61,6 +69,20 @@ export function driftResidentPersonality(
     style_tags: deriveStyleTags(nextTraits, motifs),
     updated_at: new Date().toISOString()
   };
+}
+
+export function chooseResidentSelfName(profile: ResidentPersonalityProfile): string {
+  const random = seededRandom(`${profile.seed}:self-name`);
+  const candidates = [
+    ...NAME_POOLS[profile.motifs.primary],
+    ...(profile.motifs.secondary ? NAME_POOLS[profile.motifs.secondary] : []),
+    ...(profile.traits.openness > 0.66 ? ["Iris", "Sol", "Ember", "River"] : []),
+    ...(profile.traits.conscientiousness > 0.7 ? ["Mara", "Elias", "Clara", "Jonas"] : []),
+    ...(profile.traits.extraversion > 0.68 ? ["Lucy", "Benny", "Mira", "Talia"] : []),
+    ...(profile.traits.threat_sensitivity > 0.68 ? ["Silas", "Petra", "Dara", "Gideon"] : [])
+  ];
+  const unique = [...new Set(candidates)];
+  return unique[Math.floor(random() * unique.length)] ?? "Rowan";
 }
 
 export function deriveStyleTags(

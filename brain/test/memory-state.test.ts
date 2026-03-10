@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildMemoryBundle, rememberActionReport, rememberActionSnapshot, rememberObservation } from "../src/memory/memory-state";
+import { DEFAULT_LIVESTOCK_STATE, PerceptionFrame } from "@resident/shared";
+import { buildMemoryBundle, rememberActionReport, rememberActionSnapshot, rememberObservation, syncMemoryState } from "../src/memory/memory-state";
 import { createMemoryState } from "../src/memory/memory-state";
 
 describe("memory-state", () => {
@@ -59,7 +60,7 @@ describe("memory-state", () => {
   });
 
   it("persists recent action snapshots and exposes new psychology state in the memory bundle", () => {
-    let memory = createMemoryState();
+    let memory = syncMemoryState(createMemoryState(), basePerception);
 
     for (let index = 0; index < 18; index += 1) {
       memory = rememberActionSnapshot(memory, {
@@ -75,9 +76,86 @@ describe("memory-state", () => {
     const bundle = buildMemoryBundle(memory, "resident-1");
 
     expect(memory.recent_action_snapshots).toHaveLength(16);
+    expect(memory.self_name).toBeTruthy();
+    expect(bundle.self_name).toBe(memory.self_name);
     expect(bundle.personality_profile.seed).toBe(memory.personality_profile.seed);
     expect(bundle.need_state).toEqual(memory.need_state);
     expect(bundle.bootstrap_progress).toEqual(memory.bootstrap_progress);
     expect(bundle.recent_action_snapshots).toHaveLength(16);
   });
+
+  it("chooses a permanent self-name on first sync", () => {
+    const initial = createMemoryState();
+    const named = syncMemoryState(initial, basePerception);
+    const sameAfterSecondSync = syncMemoryState(named, {
+      ...basePerception,
+      tick_time: basePerception.tick_time + 20
+    });
+
+    expect(initial.self_name).toBeUndefined();
+    expect(named.self_name).toBeTruthy();
+    expect(named.self_name_chosen_at).toBeTruthy();
+    expect(sameAfterSecondSync.self_name).toBe(named.self_name);
+  });
 });
+
+const basePerception: PerceptionFrame = {
+  agent_id: "resident-1",
+  tick_time: 6000,
+  position: { x: 0, y: 64, z: 0 },
+  biome: "plains",
+  weather: "clear",
+  light_level: 15,
+  health: 20,
+  hunger: 18,
+  inventory: { oak_log: 8, oak_planks: 8 },
+  nearby_entities: [],
+  nearby_blocks: [],
+  home_state: {
+    anchor: { x: 0, y: 64, z: 0 },
+    shelterScore: 0.75,
+    bedAvailable: true,
+    workshopReady: true,
+    guestCapacity: 0
+  },
+  snapshot_refs: [],
+  notable_places: [],
+  pantry_state: {
+    carriedCalories: 200,
+    pantryCalories: 200,
+    cookedMeals: 1,
+    cropReadiness: 0.1,
+    emergencyReserveDays: 2
+  },
+  farm_state: {
+    farmlandReady: false,
+    plantedCrops: [],
+    hydratedTiles: 0,
+    harvestableTiles: 0,
+    seedStock: {}
+  },
+  livestock_state: DEFAULT_LIVESTOCK_STATE,
+  combat_state: {
+    hostilesNearby: 0,
+    armorScore: 0,
+    weaponTier: "stone",
+    escapeRouteKnown: true
+  },
+  safe_route_state: {
+    homeRouteKnown: true,
+    nearestShelter: { x: 0, y: 64, z: 0 },
+    nightSafeRadius: 24
+  },
+  workstation_state: {
+    craftingTableNearby: true,
+    furnaceNearby: false,
+    smokerNearby: false,
+    blastFurnaceNearby: false,
+    chestNearby: false
+  },
+  storage_sites: [],
+  crop_sites: [],
+  terrain_affordances: [],
+  protected_areas: [],
+  settlement_zones: []
+};

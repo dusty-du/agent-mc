@@ -457,6 +457,8 @@ export interface WakeOrientation {
 export interface MemoryState {
   current_day: number;
   personality_profile: ResidentPersonalityProfile;
+  self_name?: string;
+  self_name_chosen_at?: string;
   need_state: ResidentNeedState;
   mind_state: ResidentMindState;
   bootstrap_progress: BootstrapProgress;
@@ -495,6 +497,7 @@ export interface MemoryBundle {
   created_at: string;
   summary: string;
   personality_profile: ResidentPersonalityProfile;
+  self_name: string;
   need_state: ResidentNeedState;
   mind_state: ResidentMindState;
   bootstrap_progress: BootstrapProgress;
@@ -535,6 +538,7 @@ export interface OvernightConsolidation {
   created_at: string;
   summary: string;
   personality_profile: ResidentPersonalityProfile;
+  self_name: string;
   insights: string[];
   carry_over_commitments: string[];
   risk_themes: string[];

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DailyOutcome } from "@resident/shared";
+import { DEFAULT_LIVESTOCK_STATE, DailyOutcome, PerceptionFrame } from "@resident/shared";
 import { FileBackedMemoryStore } from "../src/memory/file-store";
 import { MemoryManager } from "../src/memory/memory-manager";
 import { createResidentBrainServer } from "../src/server/http";
@@ -201,6 +201,7 @@ async function createHarness(cleanups: Array<() => Promise<void>>, consolidator:
   const dir = await mkdtemp(join(tmpdir(), "resident-brain-http-"));
   const sleepStore = new FileBackedSleepStore(join(dir, "sleep.json"));
   const memory = new MemoryManager(new FileBackedMemoryStore(join(dir, "memory.json")), sleepStore);
+  await memory.syncPerception(basePerception);
   const sleepCore = new SleepCore(sleepStore, consolidator);
   const server = createResidentBrainServer(memory, sleepCore, 0);
   const port = (server.address() as AddressInfo).port;
@@ -227,6 +228,66 @@ async function createHarness(cleanups: Array<() => Promise<void>>, consolidator:
     }
   };
 }
+
+const basePerception: PerceptionFrame = {
+  agent_id: "resident-1",
+  tick_time: 6000,
+  position: { x: 0, y: 64, z: 0 },
+  weather: "clear",
+  light_level: 15,
+  health: 20,
+  hunger: 18,
+  inventory: { oak_log: 8, oak_planks: 8 },
+  nearby_entities: [],
+  nearby_blocks: [],
+  home_state: {
+    anchor: { x: 0, y: 64, z: 0 },
+    shelterScore: 0.8,
+    bedAvailable: true,
+    workshopReady: true,
+    guestCapacity: 0
+  },
+  snapshot_refs: [],
+  notable_places: [],
+  pantry_state: {
+    carriedCalories: 200,
+    pantryCalories: 200,
+    cookedMeals: 1,
+    cropReadiness: 0,
+    emergencyReserveDays: 2
+  },
+  farm_state: {
+    farmlandReady: false,
+    plantedCrops: [],
+    hydratedTiles: 0,
+    harvestableTiles: 0,
+    seedStock: {}
+  },
+  livestock_state: DEFAULT_LIVESTOCK_STATE,
+  combat_state: {
+    hostilesNearby: 0,
+    armorScore: 0,
+    weaponTier: "none",
+    escapeRouteKnown: true
+  },
+  safe_route_state: {
+    homeRouteKnown: true,
+    nearestShelter: { x: 0, y: 64, z: 0 },
+    nightSafeRadius: 24
+  },
+  workstation_state: {
+    craftingTableNearby: true,
+    furnaceNearby: false,
+    smokerNearby: false,
+    blastFurnaceNearby: false,
+    chestNearby: false
+  },
+  storage_sites: [],
+  crop_sites: [],
+  terrain_affordances: [],
+  protected_areas: [],
+  settlement_zones: []
+};
 
 function createHarnessConsolidator(): SleepConsolidator {
   return {

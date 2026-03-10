@@ -129,6 +129,7 @@ describe("WakeBrain", () => {
         created_at: new Date().toISOString(),
         summary: "A difficult but meaningful day.",
         personality_profile: createMemoryState().personality_profile,
+        self_name: "Vale",
         insights: ["Failure can still be part of a good life."],
         carry_over_commitments: ["repair the home entrance"],
         risk_themes: ["Hostiles near the tree line."],

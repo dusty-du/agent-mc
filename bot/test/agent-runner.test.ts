@@ -345,6 +345,8 @@ function createMemory(): MemoryState {
       style_tags: ["homesteader", "steady"],
       updated_at: "2026-03-09T11:00:00.000Z"
     },
+    self_name: "Hazel",
+    self_name_chosen_at: "2026-03-09T11:00:00.000Z",
     need_state: {
       safety: 0.3,
       rest: 0.2,

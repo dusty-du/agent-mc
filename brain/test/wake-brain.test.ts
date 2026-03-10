@@ -233,6 +233,23 @@ describe("WakeBrain combat decisions", () => {
     expect(decision.intent.target).toBe("wood");
   });
 
+  it("chooses and remembers a permanent self-name on spawn", () => {
+    const decision = new WakeBrain().decide(
+      {
+        ...basePerception,
+        tick_time: 0
+      },
+      createMemoryState(),
+      DEFAULT_VALUE_PROFILE,
+      undefined,
+      "spawn"
+    );
+
+    expect(decision.memory.self_name).toBeTruthy();
+    expect(decision.observations.some((entry) => entry.tags.includes("identity"))).toBe(true);
+    expect(decision.observations.some((entry) => entry.summary.includes(String(decision.memory.self_name)))).toBe(true);
+  });
+
   it("retreats toward shelter at dusk instead of wandering when exposed", () => {
     const decision = new WakeBrain().decide(
       {

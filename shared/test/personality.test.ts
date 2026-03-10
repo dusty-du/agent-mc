@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { driftResidentPersonality, createResidentPersonality } from "../src/personality";
+import { chooseResidentSelfName, driftResidentPersonality, createResidentPersonality } from "../src/personality";
 
 describe("resident personality", () => {
   it("is deterministic for a given seed and varied across different seeds", () => {
@@ -41,5 +41,11 @@ describe("resident personality", () => {
     expect(Math.abs(drifted.traits.conscientiousness - profile.traits.conscientiousness)).toBeLessThanOrEqual(0.02);
     expect(Math.abs(drifted.traits.extraversion - profile.traits.extraversion)).toBeLessThanOrEqual(0.02);
     expect(drifted.style_tags.length).toBeGreaterThan(0);
+  });
+
+  it("chooses a stable self-name from the personality profile", () => {
+    const profile = createResidentPersonality("resident-alpha");
+
+    expect(chooseResidentSelfName(profile)).toBe(chooseResidentSelfName(profile));
   });
 });

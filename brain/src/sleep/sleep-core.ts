@@ -58,6 +58,7 @@ function buildOvernightConsolidation(
       outcome,
       data.cultureSignals.filter((signal) => signal.timestamp >= new Date(Date.now() - 1000 * 60 * 60 * 24 * 3).toISOString())
     ),
+    self_name: bundle.self_name,
     insights: synthesis.insights,
     carry_over_commitments: bundle.carry_over_commitments.slice(-6),
     risk_themes: synthesis.risk_themes,

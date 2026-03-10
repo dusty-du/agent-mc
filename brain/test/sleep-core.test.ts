@@ -27,6 +27,7 @@ describe("SleepCore", () => {
       const record = await sleepCore.consolidate(sampleBundle(), sampleOutcome());
 
       expect(record.overnight.carry_over_commitments).toContain("repair the doorway");
+      expect(record.overnight.self_name).toBe("Hazel");
       expect(record.overnight.insights.length).toBeGreaterThan(0);
       expect(record.overnight.personality_profile.seed).toBe("resident-seed");
       expect(Math.abs(record.overnight.personality_profile.traits.openness - sampleBundle().personality_profile.traits.openness)).toBeLessThanOrEqual(0.02);
@@ -135,6 +136,7 @@ function sampleBundle() {
       style_tags: ["homesteader", "steady"],
       updated_at: new Date().toISOString()
     },
+    self_name: "Hazel",
     need_state: {
       safety: 0.3,
       rest: 0.35,

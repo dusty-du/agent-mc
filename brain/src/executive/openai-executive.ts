@@ -94,6 +94,7 @@ export class OpenAIExecutivePlanner implements ExecutivePlanner {
                   },
                   memory: {
                     personality_profile: input.memory.personality_profile,
+                    self_name: input.memory.self_name,
                     need_state: input.memory.need_state,
                     mind_state: input.memory.mind_state,
                     bootstrap_progress: input.memory.bootstrap_progress,

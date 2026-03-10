@@ -15,6 +15,7 @@ import {
   WakeOrientation
 } from "@resident/shared";
 import {
+  chooseResidentSelfName,
   createResidentPersonality,
   DEFAULT_BOOTSTRAP_PROGRESS,
   DEFAULT_MIND_STATE,
@@ -41,6 +42,8 @@ export function createMemoryState(): MemoryState {
   return {
     current_day: 0,
     personality_profile: createResidentPersonality(),
+    self_name: undefined,
+    self_name_chosen_at: undefined,
     need_state: { ...DEFAULT_NEED_STATE },
     mind_state: { ...DEFAULT_MIND_STATE },
     bootstrap_progress: { ...DEFAULT_BOOTSTRAP_PROGRESS },
@@ -84,6 +87,8 @@ export function syncMemoryState(
   overnight?: OvernightConsolidation
 ): MemoryState {
   const personality = overnight?.personality_profile ?? memory.personality_profile;
+  const selfName = memory.self_name ?? chooseResidentSelfName(personality);
+  const selfNameChosenAt = memory.self_name_chosen_at ?? nowIso();
   const knownBeds = perception.home_state.anchor
     ? dedupePositions([perception.home_state.anchor, ...memory.known_beds])
     : [...memory.known_beds];
@@ -102,6 +107,8 @@ export function syncMemoryState(
     ...memory,
     current_day: Math.floor(perception.tick_time / 24000),
     personality_profile: personality,
+    self_name: overnight?.self_name ?? selfName,
+    self_name_chosen_at: selfNameChosenAt,
     need_state: needState,
     mind_state: mindState,
     bootstrap_progress: bootstrapProgress,
@@ -249,6 +256,7 @@ export function mergeProtectedAreas(memory: MemoryState, protectedAreas: Protect
 
 export function buildMemoryBundle(memory: MemoryState, agentId: string): MemoryBundle {
   const currentDayObservations = memory.recent_observations.slice(-24);
+  const selfName = requireSelfName(memory);
   return {
     agent_id: agentId,
     day_number: memory.current_day,
@@ -258,6 +266,7 @@ export function buildMemoryBundle(memory: MemoryState, agentId: string): MemoryB
       memory.self_narrative.at(-1) ??
       "A day of living, trying, and continuing.",
     personality_profile: { ...memory.personality_profile, traits: { ...memory.personality_profile.traits }, motifs: { ...memory.personality_profile.motifs }, style_tags: [...memory.personality_profile.style_tags] },
+    self_name: selfName,
     need_state: { ...memory.need_state },
     mind_state: { ...memory.mind_state },
     bootstrap_progress: { ...memory.bootstrap_progress },
@@ -438,6 +447,13 @@ function routinePhaseFatigue(tick: number, bedAvailable: boolean): number {
 
 function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
+}
+
+function requireSelfName(memory: MemoryState): string {
+  if (!memory.self_name) {
+    throw new Error("Resident self-name has not been chosen yet.");
+  }
+  return memory.self_name;
 }
 
 function hasTool(inventory: Record<string, number>, kind: "axe" | "pickaxe"): boolean {

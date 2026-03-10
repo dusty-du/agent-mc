@@ -121,6 +121,18 @@ export class WakeBrain {
       );
     }
 
+    if (trigger === "spawn" && !memory.self_name && nextMemory.self_name) {
+      observations.push(
+        observationFrom(
+          frame,
+          "orientation",
+          `When I opened my eyes in this world, I chose the name ${nextMemory.self_name}.`,
+          ["identity", "name", "self"],
+          "reflection"
+        )
+      );
+    }
+
     if (trigger === "protected_area_conflict") {
       observations.push(
         observationFrom(
@@ -1050,8 +1062,9 @@ function shouldSocialize(frame: PerceptionFrame, memory: MemoryState, values: Va
 function socialDialogue(frame: PerceptionFrame, memory: MemoryState): string {
   const playerName = frame.nearby_entities.find((entity) => entity.type === "player")?.name;
   const opening = playerName ? `Hello ${playerName}.` : "Hello there.";
+  const selfIntro = memory.self_name ? `I'm ${memory.self_name}.` : "";
   const mood = memory.affect.wonder > 0.6 ? "It feels good to share this part of the world." : "I'm glad for the company.";
-  return `${opening} ${mood}`;
+  return [opening, selfIntro, mood].filter(Boolean).join(" ");
 }
 
 function maybeDelightRecall(frame: PerceptionFrame, values: ValueProfile, memory: MemoryState): RecallQuery | undefined {

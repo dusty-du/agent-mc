@@ -67,6 +67,7 @@ describe("MemoryManager.recall", () => {
           created_at: timestamp,
           summary: "A garden-focused day.",
           personality_profile: createMemoryState().personality_profile,
+          self_name: "Juniper",
           need_state: createMemoryState().need_state,
           mind_state: createMemoryState().mind_state,
           bootstrap_progress: createMemoryState().bootstrap_progress,
