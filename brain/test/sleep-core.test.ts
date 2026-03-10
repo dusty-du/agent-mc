@@ -28,6 +28,8 @@ describe("SleepCore", () => {
 
       expect(record.overnight.carry_over_commitments).toContain("repair the doorway");
       expect(record.overnight.insights.length).toBeGreaterThan(0);
+      expect(record.overnight.personality_profile.seed).toBe("resident-seed");
+      expect(Math.abs(record.overnight.personality_profile.traits.openness - sampleBundle().personality_profile.traits.openness)).toBeLessThanOrEqual(0.02);
       expect(await sleepCore.latestOvernight()).toEqual(record.overnight);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -116,6 +118,48 @@ function sampleBundle() {
     day_number: 3,
     created_at: new Date().toISOString(),
     summary: "A hard but meaningful day.",
+    personality_profile: {
+      seed: "resident-seed",
+      traits: {
+        openness: 0.52,
+        conscientiousness: 0.64,
+        extraversion: 0.4,
+        agreeableness: 0.58,
+        threat_sensitivity: 0.47
+      },
+      chronotype: "steady" as const,
+      motifs: {
+        primary: "homesteader" as const,
+        secondary: "tinkerer" as const
+      },
+      style_tags: ["homesteader", "steady"],
+      updated_at: new Date().toISOString()
+    },
+    need_state: {
+      safety: 0.3,
+      rest: 0.35,
+      hunger: 0.25,
+      autonomy: 0.4,
+      competence: 0.38,
+      relatedness: 0.2,
+      beauty: 0.33
+    },
+    mind_state: {
+      valence: 0.58,
+      arousal: 0.36,
+      confidence: 0.44,
+      frustration: 0.18,
+      fatigueDebt: 0.31,
+      routinePhase: "night" as const
+    },
+    bootstrap_progress: {
+      woodSecured: true,
+      toolsReady: true,
+      shelterSecured: true,
+      lightSecured: true,
+      foodSecured: true,
+      bedSecured: true
+    },
     observations: [
       {
         timestamp: new Date().toISOString(),
@@ -147,6 +191,16 @@ function sampleBundle() {
     carry_over_commitments: ["repair the doorway"],
     recent_dangers: ["Skeleton near the tree line."],
     recent_interactions: [],
+    recent_action_snapshots: [
+      {
+        timestamp: new Date().toISOString(),
+        intent_type: "build" as const,
+        target_class: "build:doorway-repair",
+        status: "completed" as const,
+        position_delta: 2.5,
+        risk_context: "sheltered" as const
+      }
+    ],
     place_tags: ["home", "quiet corner"],
     final_affect: {
       mood: 0.6,

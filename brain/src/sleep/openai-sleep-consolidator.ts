@@ -44,6 +44,7 @@ export class OpenAISleepConsolidator implements SleepConsolidator {
                 text:
                   "You are sleep-core for an autonomous Minecraft resident. " +
                   "Perform overnight autobiographical consolidation only. " +
+                  "The bundle includes personality, current needs, recent action snapshots, and bootstrap progress. " +
                   "Do not plan wake-time actions and do not invent new commitments. " +
                   "Preserve meaning, safety, hospitality, home, and beauty. " +
                   "Return only strict JSON."

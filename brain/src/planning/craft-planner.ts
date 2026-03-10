@@ -2,23 +2,37 @@ import { CraftGoal, CraftStep, PerceptionFrame } from "@resident/shared";
 import minecraftData from "minecraft-data";
 
 type RecipeLike = {
-  ingredients?: Array<{ id: number; count?: number }>;
-  inShape?: Array<Array<{ id: number; count?: number } | null>>;
+  ingredients?: Array<number | { id: number; count?: number }>;
+  inShape?: Array<Array<number | { id: number; count?: number } | null>>;
   result?: { id: number; count?: number };
 };
+
+function normalizeIngredient(ingredient: number | { id: number; count?: number } | null | undefined): { id: number; count?: number } | undefined {
+  if (ingredient === null || ingredient === undefined) {
+    return undefined;
+  }
+  if (typeof ingredient === "number") {
+    return { id: ingredient, count: 1 };
+  }
+  return ingredient;
+}
 
 function aggregateIngredients(recipe: RecipeLike): Record<number, number> {
   const totals = new Map<number, number>();
   const add = (id: number, count = 1) => totals.set(id, (totals.get(id) ?? 0) + count);
 
   for (const ingredient of recipe.ingredients ?? []) {
-    add(ingredient.id, ingredient.count ?? 1);
+    const normalized = normalizeIngredient(ingredient);
+    if (normalized) {
+      add(normalized.id, normalized.count ?? 1);
+    }
   }
 
   for (const row of recipe.inShape ?? []) {
     for (const ingredient of row) {
-      if (ingredient) {
-        add(ingredient.id, ingredient.count ?? 1);
+      const normalized = normalizeIngredient(ingredient);
+      if (normalized) {
+        add(normalized.id, normalized.count ?? 1);
       }
     }
   }
@@ -44,7 +58,8 @@ export class CraftPlanner {
     }
 
     const visited = new Set<number>();
-    const steps = this.expandRecipe(item.id, quantity, visited, data);
+    const available = { ...(perception?.inventory ?? {}) };
+    const steps = this.expandRecipe(item.id, quantity, visited, data, available);
     const missingInputs = this.calculateMissingInputs(steps, perception?.inventory ?? {});
     const requiredStations = [...new Set(steps.map((step) => step.station).filter((station) => station !== "hand"))];
 
@@ -59,7 +74,13 @@ export class CraftPlanner {
     };
   }
 
-  private expandRecipe(itemId: number, quantity: number, visited: Set<number>, data: ReturnType<typeof minecraftData>): CraftStep[] {
+  private expandRecipe(
+    itemId: number,
+    quantity: number,
+    visited: Set<number>,
+    data: ReturnType<typeof minecraftData>,
+    available: Record<string, number>
+  ): CraftStep[] {
     if (visited.has(itemId)) {
       return [];
     }
@@ -79,9 +100,23 @@ export class CraftPlanner {
 
     for (const [ingredientId, count] of Object.entries(ingredientsById)) {
       const numericId = Number(ingredientId);
+      const ingredientName = data.items[numericId]?.name;
+      const requiredCount = count * multiplier;
+      let remaining = requiredCount;
+      if (ingredientName) {
+        const onHand = available[ingredientName] ?? 0;
+        const consumed = Math.min(onHand, requiredCount);
+        if (consumed > 0) {
+          available[ingredientName] = onHand - consumed;
+        }
+        remaining = requiredCount - consumed;
+        if (remaining <= 0) {
+          continue;
+        }
+      }
       const ingredientRecipes = data.recipes[numericId] ?? [];
       if (ingredientRecipes.length > 0) {
-        childSteps.push(...this.expandRecipe(numericId, count * multiplier, visited, data));
+        childSteps.push(...this.expandRecipe(numericId, remaining, visited, data, available));
       }
     }
 

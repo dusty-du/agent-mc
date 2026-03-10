@@ -5,6 +5,7 @@ import {
   MemoryBundle,
   OvernightConsolidation,
   ValueProfile,
+  driftResidentPersonality,
   updateValueProfile
 } from "@resident/shared";
 import { FileBackedSleepStore, SleepStoreData } from "./file-store";
@@ -44,13 +45,19 @@ export class SleepConsolidationError extends Error {
 function buildOvernightConsolidation(
   bundle: MemoryBundle,
   synthesis: SleepConsolidationResult,
-  data: SleepStoreData
+  data: SleepStoreData,
+  outcome: DailyOutcome
 ): OvernightConsolidation {
   const recentSignals = data.cultureSignals.slice(-5).map((signal) => `${signal.topic}: ${signal.notes ?? signal.signal_type}`);
   return {
     day_number: bundle.day_number,
     created_at: new Date().toISOString(),
     summary: synthesis.summary,
+    personality_profile: driftResidentPersonality(
+      bundle.personality_profile,
+      outcome,
+      data.cultureSignals.filter((signal) => signal.timestamp >= new Date(Date.now() - 1000 * 60 * 60 * 24 * 3).toISOString())
+    ),
     insights: synthesis.insights,
     carry_over_commitments: bundle.carry_over_commitments.slice(-6),
     risk_themes: synthesis.risk_themes,
@@ -84,7 +91,7 @@ export class SleepCore {
     );
 
     const synthesis = await this.buildModelSynthesis(bundle, outcome, data);
-    const overnight = buildOvernightConsolidation(bundle, synthesis, data);
+    const overnight = buildOvernightConsolidation(bundle, synthesis, data, outcome);
     const record: ConsolidationRecord = {
       dayNumber: bundle.day_number,
       createdAt: overnight.created_at,

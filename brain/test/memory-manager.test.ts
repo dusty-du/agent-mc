@@ -66,6 +66,10 @@ describe("MemoryManager.recall", () => {
           day_number: 8,
           created_at: timestamp,
           summary: "A garden-focused day.",
+          personality_profile: createMemoryState().personality_profile,
+          need_state: createMemoryState().need_state,
+          mind_state: createMemoryState().mind_state,
+          bootstrap_progress: createMemoryState().bootstrap_progress,
           observations: [
             {
               timestamp,
@@ -89,6 +93,7 @@ describe("MemoryManager.recall", () => {
           carry_over_commitments: ["Keep the garden lanterns lit."],
           recent_dangers: [],
           recent_interactions: [],
+          recent_action_snapshots: [],
           place_tags: ["rose garden"],
           final_affect: {
             mood: 0.7,

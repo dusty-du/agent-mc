@@ -42,6 +42,20 @@ interface SurvivalIntentPlan {
   project?: Pick<ProjectState, "title" | "kind" | "status" | "summary" | "location">;
 }
 
+interface DailyCandidatePlan {
+  kind: "bootstrap" | "craft" | "build" | "farm" | "livestock" | "social" | "explore" | "store" | "observe";
+  family: string;
+  baseScore: number;
+  intent: AgentIntent;
+  observationCategory: MemoryObservation["category"];
+  observationSummary: string;
+  observationTags: string[];
+  project?: Pick<ProjectState, "title" | "kind" | "status" | "summary" | "location">;
+  craftGoal?: CraftGoal;
+  buildIntent?: BuildIntent;
+  recallQuery?: RecallQuery;
+}
+
 function isoNow(): string {
   return new Date().toISOString();
 }
@@ -261,7 +275,7 @@ export class WakeBrain {
       };
     }
 
-    const survivalIntent = pickSurvivalIntent(frame);
+    const survivalIntent = pickSurvivalIntent(frame, nextMemory);
     if (survivalIntent) {
       observations.push(
         observationFrom(
@@ -290,8 +304,41 @@ export class WakeBrain {
       };
     }
 
-    const daytime = frame.tick_time % 24000;
-    if (daytime >= 12500 && frame.home_state.bedAvailable && values.safetyFloors.sleepNightly) {
+    const phase = nextMemory.mind_state.routinePhase;
+    if (
+      (phase === "dusk" || phase === "night") &&
+      frame.home_state.shelterScore < 0.45 &&
+      (frame.safe_route_state.nearestShelter ?? frame.home_state.anchor)
+    ) {
+      observations.push(
+        observationFrom(
+          frame,
+          "danger",
+          "Night asks for shelter first; exposed ground can wait until morning.",
+          ["night", "shelter", "survival"],
+          "reflection"
+        )
+      );
+      return {
+        intent: {
+          agent_id: frame.agent_id,
+          intent_type: "retreat",
+          target: frame.safe_route_state.nearestShelter ?? frame.home_state.anchor,
+          reason: "Reach enclosed shelter before darkness turns routine work into risk.",
+          priority: 1,
+          cancel_conditions: ["shelter reached", "immediate combat begins"],
+          success_conditions: ["arrived at a safer sheltered location"],
+          dialogue: "I need walls and light before I need anything else.",
+          trigger
+        },
+        memory: nextMemory,
+        observations,
+        replanLevel,
+        wakeOrientation
+      };
+    }
+
+    if ((phase === "dusk" || phase === "night") && frame.home_state.bedAvailable && values.safetyFloors.sleepNightly) {
       observations.push(
         observationFrom(
           frame,
@@ -319,258 +366,28 @@ export class WakeBrain {
       };
     }
 
-    if (shouldStore(frame) && frame.workstation_state?.chestNearby) {
-      observations.push(
-        observationFrom(frame, "project", "My pockets are getting too full; it is time to put things in order.", ["storage", "home", "order"])
-      );
-      return {
-        intent: {
-          agent_id: frame.agent_id,
-          intent_type: "store",
-          reason: "Keeping tools and resources organized protects future work.",
-          priority: 2,
-          cancel_conditions: ["danger appears"],
-          success_conditions: ["items deposited into nearby storage"],
-          dialogue: "I should put these things away before I lose track of them.",
-          trigger
-        },
-        memory: rememberProject(nextMemory, {
-          title: "Keep home organized",
-          kind: "recovery",
-          status: "active",
-          summary: "Storage keeps the day from scattering.",
-          location: frame.home_state.anchor ?? frame.position
-        }),
-        observations,
-        replanLevel,
-        wakeOrientation
-      };
-    }
+    const candidate = this.pickDailyCandidate(frame, nextMemory, values, trigger);
+    const buildPlan = candidate.buildIntent ? this.buildPlanner.plan(candidate.buildIntent, frame) : undefined;
 
-    if (shouldFarm(frame)) {
-      observations.push(
-        observationFrom(frame, "food", "The fields need attention if I want tomorrow to feel easy.", ["farm", "food", "stewardship"])
-      );
-      return {
-        intent: {
-          agent_id: frame.agent_id,
-          intent_type: "farm",
-          reason: "Food systems deserve steady care, not only emergency panic.",
-          priority: 2,
-          cancel_conditions: ["danger appears", "night falls too close"],
-          success_conditions: ["crops harvested, planted, or farmland improved"],
-          dialogue: "I want to tend the fields while the day is still kind.",
-          trigger
-        },
-        memory: rememberProject(nextMemory, {
-          title: "Keep the fields alive",
-          kind: "farm",
-          status: "active",
-          summary: "Food grows through repeated care.",
-          location: frame.home_state.anchor ?? frame.position
-        }),
-        observations,
-        replanLevel,
-        wakeOrientation
-      };
-    }
-
-    if (shouldTendLivestock(frame)) {
-      observations.push(
-        observationFrom(frame, "livestock", "The animals need care if this place is going to feel alive and abundant.", ["livestock", "care", "stewardship"])
-      );
-      return {
-        intent: {
-          agent_id: frame.agent_id,
-          intent_type: "tend_livestock",
-          reason: "Healthy animals are part of a gentle, renewable home.",
-          priority: 2,
-          cancel_conditions: ["danger appears", "night falls too close"],
-          success_conditions: ["animals fed, checked, or their space improved"],
-          dialogue: "I should care for the animals before asking more from them.",
-          trigger
-        },
-        memory: rememberProject(nextMemory, {
-          title: "Care for the animals",
-          kind: "livestock",
-          status: "active",
-          summary: "The pens and herds shape the feeling of home.",
-          location: frame.home_state.anchor ?? frame.position
-        }),
-        observations,
-        replanLevel,
-        wakeOrientation
-      };
-    }
-
-    if (shouldSocialize(frame, nextMemory, values)) {
-      observations.push(
-        observationFrom(frame, "social", "Warm company is part of a good life too.", ["social", "hospitality", "belonging"], "reflection")
-      );
-      return {
-        intent: {
-          agent_id: frame.agent_id,
-          intent_type: "socialize",
-          target: frame.nearby_entities.find((entity) => entity.type === "player")?.name,
-          reason: "Connection and welcome matter alongside work.",
-          priority: 3,
-          cancel_conditions: ["danger appears", "the player leaves"],
-          success_conditions: ["a kind exchange happens"],
-          dialogue: socialDialogue(frame, nextMemory),
-          trigger
-        },
-        memory: rememberProject(nextMemory, {
-          title: "Share a warm moment",
-          kind: "social",
-          status: "active",
-          summary: "Hospitality is part of what makes a place feel real.",
-          location: frame.home_state.anchor ?? frame.position
-        }),
-        observations,
-        replanLevel,
-        wakeOrientation
-      };
-    }
-
-    const nextCraft = this.pickCraft(frame, nextMemory);
-    if (nextCraft) {
-      nextMemory = rememberProject(nextMemory, {
-        title: `Craft ${nextCraft.target_item}`,
-        kind: "craft",
-        status: "active",
-        summary: nextCraft.purpose,
-        location: frame.home_state.anchor ?? frame.position
-      });
-      observations.push(
-        observationFrom(frame, "crafting", `A useful next step is ${nextCraft.target_item}.`, ["craft", nextCraft.target_item], "reflection")
-      );
-      return {
-        intent: {
-          agent_id: frame.agent_id,
-          intent_type: "craft",
-          target: nextCraft.target_item,
-          reason: `Craft ${nextCraft.target_item} to support ${nextCraft.purpose}.`,
-          priority: 3,
-          cancel_conditions: ["materials unavailable", "night emergency"],
-          success_conditions: [`${nextCraft.quantity} ${nextCraft.target_item} crafted`],
-          dialogue: `I want to make ${nextCraft.target_item} next.`,
-          trigger
-        },
-        memory: nextMemory,
-        observations,
-        replanLevel,
-        wakeOrientation,
-        craftGoal: nextCraft
-      };
-    }
-
-    const bootstrapIntent = pickBootstrapIntent(frame);
-    if (needsBootstrapMaterials(frame) && bootstrapIntent) {
-      observations.push(
-        observationFrom(
-          frame,
-          "project",
-          "I need starter materials before I can turn this place into a real home.",
-          ["bootstrap", "materials", "survival"],
-          "reflection"
-        )
-      );
-      return {
-        intent: {
-          agent_id: frame.agent_id,
-          intent_type: bootstrapIntent.intentType,
-          target: bootstrapIntent.target,
-          reason: bootstrapIntent.reason,
-          priority: 3,
-          cancel_conditions: ["danger appears", "night falls too close"],
-          success_conditions: bootstrapIntent.successConditions,
-          dialogue: bootstrapIntent.dialogue,
-          trigger
-        },
-        memory: bootstrapIntent.project ? rememberProject(nextMemory, bootstrapIntent.project) : nextMemory,
-        observations,
-        replanLevel,
-        wakeOrientation
-      };
-    }
-
-    const buildIntent = this.pickBuildIntent(frame, nextMemory, values);
-    const buildPlan = this.buildPlanner.plan(buildIntent, frame);
     observations.push(
-      observationFrom(
-        frame,
-        buildIntent.rebuild_of ? "rebuild" : "building",
-        `A new build direction is taking shape: ${buildIntent.purpose}.`,
-        ["building", "home", ...buildIntent.style_tags]
-      )
+      observationFrom(frame, candidate.observationCategory, candidate.observationSummary, candidate.observationTags, "reflection")
     );
-
-    const recallQuery = trigger === "wake"
-      ? {
-          query: buildIntent.purpose,
-          tags: buildIntent.style_tags,
-          limit: 3
-        }
-      : maybeDelightRecall(frame, values);
-
-    const delightMove = pickDelightMove(frame, values, nextMemory);
-    if (delightMove) {
-      observations.push(
-        observationFrom(frame, "beauty", delightMove.summary, ["beauty", "curiosity", "joy"], "reflection")
-      );
-      return {
-        intent: {
-          agent_id: frame.agent_id,
-          intent_type: "move",
-          target: delightMove.target,
-          reason: delightMove.reason,
-          priority: 4,
-          cancel_conditions: ["danger appears", "night gets too close"],
-          success_conditions: ["arrived at the chosen place"],
-          dialogue: delightMove.dialogue,
-          trigger
-        },
-        memory: rememberProject(nextMemory, {
-          title: "Follow a moment of curiosity",
-          kind: "explore",
-          status: "active",
-          summary: delightMove.reason,
-          location: delightMove.target
-        }),
-        observations,
-        replanLevel,
-        wakeOrientation,
-        recallQuery
-      };
-    }
-
-    nextMemory = rememberProject(nextMemory, {
-      title: buildIntent.purpose,
-      kind: buildIntent.rebuild_of ? "rebuild" : "build",
-      status: "active",
-      summary: `Shape the world toward ${buildIntent.purpose}.`,
-      location: buildIntent.site.center ?? frame.home_state.anchor ?? frame.position
-    });
 
     return {
       intent: {
+        ...candidate.intent,
         agent_id: frame.agent_id,
-        intent_type: buildIntent.rebuild_of ? "rebuild" : "build",
-        target: buildIntent.purpose,
-        reason: `Shape the world into a place worth living in: ${buildIntent.purpose}.`,
-        priority: 4,
-        cancel_conditions: ["immediate hunger or danger", "material bottleneck"],
-        success_conditions: buildPlan.completion_checks,
-        dialogue: "I want to make this place feel more like home.",
+        success_conditions: buildPlan?.completion_checks ?? candidate.intent.success_conditions,
         trigger
       },
-      memory: nextMemory,
+      memory: candidate.project ? rememberProject(nextMemory, candidate.project) : nextMemory,
       observations,
       replanLevel,
       wakeOrientation,
+      craftGoal: candidate.craftGoal,
       buildPlan,
-      recallQuery
-      };
+      recallQuery: candidate.recallQuery
+    };
   }
 
   private orient(frame: PerceptionFrame, memory: MemoryState, overnight?: OvernightConsolidation): WakeOrientation {
@@ -615,31 +432,457 @@ export class WakeBrain {
     return Math.max(0, threatPressure + hungerPenalty - armorRelief);
   }
 
-  private pickCraft(frame: PerceptionFrame, memory: MemoryState): CraftGoal | undefined {
-    if (!frame.home_state.bedAvailable && (frame.inventory.white_wool ?? 0) >= 3 && countAnyPlanks(frame.inventory) >= 3) {
-      return this.craftPlanner.plan("white_bed", 1, "secure nightly sleep", frame);
+  private pickDailyCandidate(
+    frame: PerceptionFrame,
+    memory: MemoryState,
+    values: ValueProfile,
+    trigger: ReplanTrigger
+  ): DailyCandidatePlan {
+    const candidates: DailyCandidatePlan[] = [];
+
+    const bootstrapCandidate = this.pickBootstrapCandidate(frame, memory, values);
+    if (bootstrapCandidate) {
+      candidates.push(bootstrapCandidate);
+    }
+
+    candidates.push(...this.pickCraftCandidates(frame, memory));
+
+    const urgentTorch = candidates.find(
+      (candidate) =>
+        candidate.family === "craft:torch" &&
+        !memory.bootstrap_progress.lightSecured &&
+        (memory.mind_state.routinePhase === "homeward" ||
+          memory.mind_state.routinePhase === "dusk" ||
+          frame.light_level <= 7)
+    );
+    if (urgentTorch) {
+      return urgentTorch;
+    }
+
+    if (shouldStore(frame) && frame.workstation_state?.chestNearby) {
+      candidates.push({
+        kind: "store",
+        family: "store",
+        baseScore: 0.54,
+        intent: {
+          agent_id: frame.agent_id,
+          intent_type: "store",
+          reason: "Keeping tools and resources organized protects future work.",
+          priority: 2,
+          cancel_conditions: ["danger appears"],
+          success_conditions: ["items deposited into nearby storage"],
+          dialogue: "I should put these things away before I lose track of them."
+        },
+        observationCategory: "project",
+        observationSummary: "My pockets are getting too full; it is time to put things in order.",
+        observationTags: ["storage", "home", "order"],
+        project: {
+          title: "Keep home organized",
+          kind: "recovery",
+          status: "active",
+          summary: "Storage keeps the day from scattering.",
+          location: frame.home_state.anchor ?? frame.position
+        }
+      });
+    }
+
+    if (shouldFarm(frame, memory)) {
+      candidates.push({
+        kind: "farm",
+        family: "farm",
+        baseScore: 0.58,
+        intent: {
+          agent_id: frame.agent_id,
+          intent_type: "farm",
+          reason: "Food systems deserve steady care, especially once the basics are safe.",
+          priority: 2,
+          cancel_conditions: ["danger appears", "night falls too close"],
+          success_conditions: ["crops harvested, planted, or farmland improved"],
+          dialogue: "I want to tend the fields while the day is still kind."
+        },
+        observationCategory: "food",
+        observationSummary: "The fields need attention if I want tomorrow to feel easy.",
+        observationTags: ["farm", "food", "stewardship"],
+        project: {
+          title: "Keep the fields alive",
+          kind: "farm",
+          status: "active",
+          summary: "Food grows through repeated care.",
+          location: frame.home_state.anchor ?? frame.position
+        }
+      });
+    }
+
+    if (shouldTendLivestock(frame, memory)) {
+      candidates.push({
+        kind: "livestock",
+        family: "tend_livestock",
+        baseScore: 0.46,
+        intent: {
+          agent_id: frame.agent_id,
+          intent_type: "tend_livestock",
+          reason: "Healthy animals are part of a gentle, renewable home.",
+          priority: 2,
+          cancel_conditions: ["danger appears", "night falls too close"],
+          success_conditions: ["animals fed, checked, or their space improved"],
+          dialogue: "I should care for the animals before asking more from them."
+        },
+        observationCategory: "livestock",
+        observationSummary: "The animals need care if this place is going to feel alive and abundant.",
+        observationTags: ["livestock", "care", "stewardship"],
+        project: {
+          title: "Care for the animals",
+          kind: "livestock",
+          status: "active",
+          summary: "The pens and herds shape the feeling of home.",
+          location: frame.home_state.anchor ?? frame.position
+        }
+      });
+    }
+
+    if (shouldSocialize(frame, memory, values)) {
+      candidates.push({
+        kind: "social",
+        family: `socialize:${frame.nearby_entities.find((entity) => entity.type === "player")?.name ?? "nearby-player"}`,
+        baseScore: 0.54,
+        intent: {
+          agent_id: frame.agent_id,
+          intent_type: "socialize",
+          target: frame.nearby_entities.find((entity) => entity.type === "player")?.name,
+          reason: "Connection and welcome matter alongside work.",
+          priority: 3,
+          cancel_conditions: ["danger appears", "the player leaves"],
+          success_conditions: ["a kind exchange happens"],
+          dialogue: socialDialogue(frame, memory)
+        },
+        observationCategory: "social",
+        observationSummary: "Warm company is part of a good life too.",
+        observationTags: ["social", "hospitality", "belonging"],
+        project: {
+          title: "Share a warm moment",
+          kind: "social",
+          status: "active",
+          summary: "Hospitality is part of what makes a place feel real.",
+          location: frame.home_state.anchor ?? frame.position
+        }
+      });
+    }
+
+    const buildIntent = this.pickBuildIntent(frame, memory, values);
+    const buildKind = buildIntent.rebuild_of ? "rebuild" : "build";
+    candidates.push({
+      kind: "build",
+      family: `${buildKind}:${buildIntent.purpose}`,
+      baseScore: frame.home_state.shelterScore < 0.55 ? 0.88 : 0.38,
+      intent: {
+        agent_id: frame.agent_id,
+        intent_type: buildKind,
+        target: buildIntent.purpose,
+        reason: `Shape the world into a place worth living in: ${buildIntent.purpose}.`,
+        priority: 4,
+        cancel_conditions: ["immediate hunger or danger", "material bottleneck"],
+        success_conditions: ["build stage completed"],
+        dialogue: "I want to make this place feel more like home."
+      },
+      observationCategory: buildIntent.rebuild_of ? "rebuild" : "building",
+      observationSummary: `A new build direction is taking shape: ${buildIntent.purpose}.`,
+      observationTags: ["building", "home", ...buildIntent.style_tags],
+      project: {
+        title: buildIntent.purpose,
+        kind: buildIntent.rebuild_of ? "rebuild" : "build",
+        status: "active",
+        summary: `Shape the world toward ${buildIntent.purpose}.`,
+        location: buildIntent.site.center ?? frame.home_state.anchor ?? frame.position
+      },
+      buildIntent,
+      recallQuery:
+        trigger === "wake"
+          ? {
+              query: buildIntent.purpose,
+              tags: buildIntent.style_tags,
+              limit: 3
+            }
+          : maybeDelightRecall(frame, values, memory)
+    });
+
+    const delightMove = pickDelightMove(frame, values, memory);
+    if (delightMove) {
+      candidates.push({
+        kind: "explore",
+        family: `move:${Math.round(delightMove.target.x)}:${Math.round(delightMove.target.y)}:${Math.round(delightMove.target.z)}`,
+        baseScore: 0.26,
+        intent: {
+          agent_id: frame.agent_id,
+          intent_type: "move",
+          target: delightMove.target,
+          reason: delightMove.reason,
+          priority: 4,
+          cancel_conditions: ["danger appears", "night gets too close"],
+          success_conditions: ["arrived at the chosen place"],
+          dialogue: delightMove.dialogue
+        },
+        observationCategory: "beauty",
+        observationSummary: delightMove.summary,
+        observationTags: ["beauty", "curiosity", "joy"],
+        project: {
+          title: "Follow a moment of curiosity",
+          kind: "explore",
+          status: "active",
+          summary: delightMove.reason,
+          location: delightMove.target
+        },
+        recallQuery: maybeDelightRecall(frame, values, memory)
+      });
+    }
+
+    candidates.push({
+      kind: "observe",
+      family: "observe",
+      baseScore: 0.12,
+      intent: {
+        agent_id: frame.agent_id,
+        intent_type: "observe",
+        reason: "Pause, look carefully, and let the next worthwhile thread reveal itself.",
+        priority: 4,
+        cancel_conditions: ["danger appears", "a clearer opportunity surfaces"],
+        success_conditions: ["a more grounded next step becomes clear"],
+        dialogue: "I want one clear read of the moment before I commit."
+      },
+      observationCategory: "orientation",
+      observationSummary: "A short pause can prevent a pointless loop and make the next step clearer.",
+      observationTags: ["reflection", "anti-stuck", "attention"]
+    });
+
+    const ranked = candidates
+      .map((candidate) => ({
+        candidate,
+        score: scoreCandidate(candidate, frame, memory, values)
+      }))
+      .sort((left, right) => right.score - left.score);
+
+    return ranked[0]?.candidate ?? candidates[candidates.length - 1];
+  }
+
+  private pickCraftCandidates(frame: PerceptionFrame, memory: MemoryState): DailyCandidatePlan[] {
+    const candidates: DailyCandidatePlan[] = [];
+    const canUseWorkbench =
+      frame.home_state.workshopReady || frame.workstation_state?.craftingTableNearby || (frame.inventory.crafting_table ?? 0) > 0;
+
+    if (!frame.home_state.workshopReady && (frame.inventory.crafting_table ?? 0) === 0) {
+      const tableGoal = safeCraftPlan(this.craftPlanner, "crafting_table", 1, "set up a basic workshop", frame);
+      if (tableGoal && isCraftGoalReady(tableGoal, frame)) {
+        candidates.push(craftCandidate(frame, tableGoal, 0.98));
+      }
+    }
+
+    if (!memory.bootstrap_progress.toolsReady && canUseWorkbench) {
+      const toolMaterial = countItems(frame.inventory, ["cobblestone", "blackstone", "cobbled_deepslate"]) >= 6 ? "stone" : "wooden";
+      if (!hasTool(frame.inventory, "axe")) {
+        const axeGoal = safeCraftPlan(this.craftPlanner, `${toolMaterial}_axe`, 1, "speed up wood gathering", frame);
+        if (axeGoal && isCraftGoalReady(axeGoal, frame)) {
+          candidates.push(craftCandidate(frame, axeGoal, 0.92));
+        }
+      }
+      if (!hasTool(frame.inventory, "pickaxe")) {
+        const pickaxeGoal = safeCraftPlan(this.craftPlanner, `${toolMaterial}_pickaxe`, 1, "unlock stone and useful ores", frame);
+        if (pickaxeGoal && isCraftGoalReady(pickaxeGoal, frame)) {
+          candidates.push(craftCandidate(frame, pickaxeGoal, 0.9));
+        }
+      }
+    }
+
+    if (!memory.bootstrap_progress.lightSecured && countItems(frame.inventory, ["coal", "charcoal"]) >= 1 && (frame.inventory.stick ?? 0) >= 1) {
+      const torchGoal = safeCraftPlan(this.craftPlanner, "torch", 8, "light shelter and safe routes before night", frame);
+      if (torchGoal && isCraftGoalReady(torchGoal, frame)) {
+        candidates.push(craftCandidate(frame, torchGoal, 0.94));
+      }
+    }
+
+    if (!memory.bootstrap_progress.bedSecured && (frame.inventory.white_wool ?? 0) >= 3 && countAnyPlanks(frame.inventory) >= 3) {
+      const bedGoal = safeCraftPlan(this.craftPlanner, "white_bed", 1, "secure nightly sleep", frame);
+      if (bedGoal && isCraftGoalReady(bedGoal, frame)) {
+        candidates.push(craftCandidate(frame, bedGoal, 0.93));
+      }
     }
 
     if (!frame.inventory.shield && (frame.inventory.iron_ingot ?? 0) >= 1 && countAnyPlanks(frame.inventory) >= 6) {
-      return this.craftPlanner.plan("shield", 1, "defensive survival", frame);
+      const shieldGoal = safeCraftPlan(this.craftPlanner, "shield", 1, "survive danger without wasting food and health", frame);
+      if (shieldGoal && isCraftGoalReady(shieldGoal, frame)) {
+        candidates.push(craftCandidate(frame, shieldGoal, 0.74));
+      }
     }
 
-    return memory.craft_backlog[0];
+    const backlogGoal = memory.craft_backlog[0];
+    if (backlogGoal && isCraftGoalReady(backlogGoal, frame)) {
+      candidates.push(craftCandidate(frame, backlogGoal, 0.58));
+    }
+
+    return candidates;
+  }
+
+  private pickBootstrapCandidate(frame: PerceptionFrame, memory: MemoryState, values: ValueProfile): DailyCandidatePlan | undefined {
+    const phase = memory.mind_state.routinePhase;
+    const progress = memory.bootstrap_progress;
+    const treeAffordance = nearestAffordance(frame, ["tree"]);
+
+    if (!progress.woodSecured) {
+      if (treeAffordance) {
+        return {
+          kind: "bootstrap",
+          family: "gather:wood",
+          baseScore: phase === "dawn" || phase === "work" ? 1.08 : 0.96,
+          intent: {
+            agent_id: frame.agent_id,
+            intent_type: "gather",
+            target: "wood",
+            reason: "Gather wood first so shelter, tools, and food systems are actually possible.",
+            priority: 3,
+            cancel_conditions: ["danger appears", "night falls too close"],
+            success_conditions: ["wood collected for basic survival work"],
+            dialogue: "I need wood before this place can start feeling livable."
+          },
+          observationCategory: "project",
+          observationSummary: "The first good decision is still wood; nothing durable starts without it.",
+          observationTags: ["bootstrap", "wood", "survival"],
+          project: {
+            title: "Bootstrap the basics",
+            kind: "explore",
+            status: "active",
+            summary: "Gather the first materials needed for food and shelter.",
+            location: treeAffordance.location
+          }
+        };
+      }
+
+      const scoutTarget = pickScoutTarget(frame, ["tree", "water", "flat"]);
+      if (scoutTarget) {
+        return {
+          kind: "bootstrap",
+          family: `move:${Math.round(scoutTarget.location.x)}:${Math.round(scoutTarget.location.y)}:${Math.round(scoutTarget.location.z)}`,
+          baseScore: 0.82,
+          intent: {
+            agent_id: frame.agent_id,
+            intent_type: "move",
+            target: scoutTarget.location,
+            reason: `Move toward ${scoutTarget.label} to find better ground for wood, food, and shelter.`,
+            priority: 3,
+            cancel_conditions: ["danger appears", "night falls too close"],
+            success_conditions: ["reached a more promising place to continue surviving"],
+            dialogue: `I should head toward the ${scoutTarget.label} and see what it offers.`
+          },
+          observationCategory: "project",
+          observationSummary: "Standing still will not solve survival; I need a better foothold.",
+          observationTags: ["bootstrap", "scout", "survival"],
+          project: {
+            title: "Scout a better foothold",
+            kind: "explore",
+            status: "active",
+            summary: `Look for a more promising place near the ${scoutTarget.label}.`,
+            location: scoutTarget.location
+          }
+        };
+      }
+    }
+
+    if (!progress.shelterSecured) {
+      const buildIntent = this.pickBuildIntent(frame, memory, values);
+      return {
+        kind: "bootstrap",
+        family: `build:${buildIntent.purpose}`,
+        baseScore: phase === "dusk" || phase === "night" ? 1.04 : 0.86,
+        intent: {
+          agent_id: frame.agent_id,
+          intent_type: buildIntent.rebuild_of ? "rebuild" : "build",
+          target: buildIntent.purpose,
+          reason: "A roof, walls, and a clear home anchor matter before comfort projects do.",
+          priority: 3,
+          cancel_conditions: ["danger appears", "materials run out"],
+          success_conditions: ["basic shelter becomes safer and more usable"],
+          dialogue: "I need a shelter that can actually hold the night back."
+        },
+        observationCategory: "building",
+        observationSummary: "Temporary shelter is the next real milestone; decoration can wait.",
+        observationTags: ["bootstrap", "shelter", "survival"],
+        project: {
+          title: "Secure basic shelter",
+          kind: "build",
+          status: "active",
+          summary: "Shape a first shelter before expanding into comfort.",
+          location: frame.home_state.anchor ?? frame.position
+        },
+        buildIntent
+      };
+    }
+
+    if (!progress.foodSecured && phase !== "night") {
+      const scoutTarget = pickScoutTarget(frame, ["water", "flat", "tree"]);
+      if (scoutTarget) {
+        return {
+          kind: "bootstrap",
+          family: `move:${Math.round(scoutTarget.location.x)}:${Math.round(scoutTarget.location.y)}:${Math.round(scoutTarget.location.z)}`,
+          baseScore: 0.66,
+          intent: {
+            agent_id: frame.agent_id,
+            intent_type: "move",
+            target: scoutTarget.location,
+            reason: `Move toward ${scoutTarget.label} to secure food and better working ground.`,
+            priority: 3,
+            cancel_conditions: ["danger appears", "night falls too close"],
+            success_conditions: ["reached a better place for food or shelter work"],
+            dialogue: `I should check the ${scoutTarget.label} before hunger gets louder.`
+          },
+          observationCategory: "food",
+          observationSummary: "Food security is still unfinished, so I should move toward better ground for it.",
+          observationTags: ["bootstrap", "food", "survival"],
+          project: {
+            title: "Secure food footing",
+            kind: "explore",
+            status: "active",
+            summary: `Look for food-friendly ground near the ${scoutTarget.label}.`,
+            location: scoutTarget.location
+          }
+        };
+      }
+    }
+
+    return undefined;
   }
 
   private pickBuildIntent(frame: PerceptionFrame, memory: MemoryState, values: ValueProfile): BuildIntent {
+    const personality = memory.personality_profile;
+    const phase = memory.mind_state.routinePhase;
+    const styleTags = [
+      ...new Set([
+        ...personality.style_tags,
+        personality.motifs.primary,
+        ...(personality.motifs.secondary ? [personality.motifs.secondary] : [])
+      ])
+    ];
+
     if (memory.build_backlog.length > 0) {
       return memory.build_backlog[0];
     }
 
-    if (frame.home_state.shelterScore < 0.55) {
+    if (!memory.bootstrap_progress.shelterSecured || frame.home_state.shelterScore < 0.55) {
       return {
         purpose: "a cozy safe home that protects sleep, food, and tools",
         site: { center: frame.home_state.anchor ?? frame.position, radius: 8 },
-        style_tags: ["cozy", "shelter", "repairable"],
+        style_tags: ["cozy", "shelter", "repairable", ...styleTags].slice(0, 5),
         functional_requirements: ["bed access", "storage", "lighting", "future pantry"],
         aesthetic_goals: ["warm entrance", "pleasant proportions"],
         materials_preference: ["oak_planks", "cobblestone", "torch"],
+        expandable: true
+      };
+    }
+
+    if (!memory.bootstrap_progress.bedSecured && (phase === "homeward" || phase === "dusk" || phase === "night")) {
+      return {
+        purpose: "finish a sheltered sleeping corner before the next night deepens",
+        site: { center: frame.home_state.anchor ?? frame.position, radius: 8 },
+        style_tags: ["sleep", "shelter", "practical", ...styleTags].slice(0, 5),
+        functional_requirements: ["bed space", "lighting", "door access", "safe path"],
+        aesthetic_goals: ["warm threshold", "calm interior"],
+        materials_preference: ["oak_planks", "torch", "cobblestone"],
         expandable: true
       };
     }
@@ -648,7 +891,7 @@ export class WakeBrain {
       return {
         purpose: "repair and improve the animal spaces near home",
         site: { center: frame.home_state.anchor ?? frame.position, radius: 12 },
-        style_tags: ["practical", "gentle", "livestock"],
+        style_tags: ["practical", "gentle", "livestock", ...styleTags].slice(0, 5),
         functional_requirements: ["secure pens", "safe gates", "lighting"],
         aesthetic_goals: ["clear paths", "pleasant farm edge"],
         materials_preference: ["fence", "fence_gate", "torch", "oak_planks"],
@@ -657,11 +900,11 @@ export class WakeBrain {
       };
     }
 
-    if (values.hospitality > 0.52) {
+    if (values.hospitality > 0.52 || personality.motifs.primary === "host" || personality.traits.extraversion > 0.66) {
       return {
         purpose: "expand home for future guests and shared evenings",
         site: { center: frame.home_state.anchor ?? frame.position, radius: 14 },
-        style_tags: ["welcoming", "social", "garden"],
+        style_tags: ["welcoming", "social", "garden", ...styleTags].slice(0, 5),
         functional_requirements: ["spare bed", "sitting area", "lit path", "food access"],
         aesthetic_goals: ["beautiful approach", "visible warmth"],
         materials_preference: ["oak_planks", "glass", "torch"],
@@ -669,10 +912,23 @@ export class WakeBrain {
       };
     }
 
+    if (personality.motifs.primary === "wanderer" || personality.traits.openness > 0.7 || values.curiosity > 0.66) {
+      return {
+        purpose: "shape a lookout and path that make the nearby land feel known",
+        site: { center: frame.home_state.anchor ?? frame.position, radius: 12 },
+        style_tags: ["lookout", "path", "curious", ...styleTags].slice(0, 5),
+        functional_requirements: ["lit route", "clear sightline", "easy return home"],
+        aesthetic_goals: ["memorable approach", "small scenic perch"],
+        materials_preference: ["oak_planks", "torch", "cobblestone"],
+        expandable: true,
+        rebuild_of: "current home"
+      };
+    }
+
     return {
       purpose: "improve the comfort and beauty of home",
       site: { center: frame.home_state.anchor ?? frame.position, radius: 10 },
-      style_tags: ["comfort", "beauty", "home"],
+      style_tags: ["comfort", "beauty", "home", ...styleTags].slice(0, 5),
       functional_requirements: ["clear path", "better storage", "pleasant lighting"],
       aesthetic_goals: ["more charm", "more light", "more sense of belonging"],
       materials_preference: ["oak_planks", "torch", "glass"],
@@ -689,8 +945,8 @@ function nearestHostileDistance(frame: PerceptionFrame): number | undefined {
     .sort((left, right) => left - right)[0];
 }
 
-function pickSurvivalIntent(frame: PerceptionFrame): SurvivalIntentPlan | undefined {
-  if (frame.hunger > 8 && frame.pantry_state.emergencyReserveDays >= 1) {
+function pickSurvivalIntent(frame: PerceptionFrame, memory: MemoryState): SurvivalIntentPlan | undefined {
+  if (frame.hunger > 8 && frame.pantry_state.emergencyReserveDays >= 1 && memory.bootstrap_progress.foodSecured) {
     return undefined;
   }
 
@@ -704,7 +960,7 @@ function pickSurvivalIntent(frame: PerceptionFrame): SurvivalIntentPlan | undefi
     };
   }
 
-  if (hasNearbyFarmOpportunity(frame)) {
+  if (hasNearbyFarmOpportunity(frame) && memory.bootstrap_progress.shelterSecured && memory.mind_state.routinePhase !== "night") {
     return {
       intentType: "farm",
       reason: "Food systems deserve steady care, especially when reserves are thin.",
@@ -721,7 +977,7 @@ function pickSurvivalIntent(frame: PerceptionFrame): SurvivalIntentPlan | undefi
     };
   }
 
-  const bootstrapIntent = pickBootstrapIntent(frame);
+  const bootstrapIntent = pickEmergencyBootstrapIntent(frame, memory);
   if (bootstrapIntent) {
     return bootstrapIntent;
   }
@@ -743,8 +999,14 @@ function shouldStore(frame: PerceptionFrame): boolean {
   return Object.keys(frame.inventory).length >= 12 || countItems(frame.inventory, Object.keys(frame.inventory)) >= 48;
 }
 
-function shouldFarm(frame: PerceptionFrame): boolean {
+function shouldFarm(frame: PerceptionFrame, memory: MemoryState): boolean {
   if (frame.hunger <= 8 || frame.pantry_state.emergencyReserveDays < 1) {
+    return false;
+  }
+  if (!memory.bootstrap_progress.shelterSecured || !memory.bootstrap_progress.woodSecured) {
+    return false;
+  }
+  if (memory.mind_state.routinePhase === "dusk" || memory.mind_state.routinePhase === "night") {
     return false;
   }
   return hasNearbyFarmOpportunity(frame);
@@ -759,8 +1021,11 @@ function hasNearbyFarmOpportunity(frame: PerceptionFrame): boolean {
   );
 }
 
-function shouldTendLivestock(frame: PerceptionFrame): boolean {
+function shouldTendLivestock(frame: PerceptionFrame, memory: MemoryState): boolean {
   if (!frame.nearby_entities.some((entity) => entity.type === "passive")) {
+    return false;
+  }
+  if (!memory.bootstrap_progress.shelterSecured || memory.mind_state.routinePhase === "dusk" || memory.mind_state.routinePhase === "night") {
     return false;
   }
   if (frame.livestock_state.welfareFlags.length > 0) {
@@ -771,7 +1036,15 @@ function shouldTendLivestock(frame: PerceptionFrame): boolean {
 
 function shouldSocialize(frame: PerceptionFrame, memory: MemoryState, values: ValueProfile): boolean {
   const playersNearby = frame.nearby_entities.some((entity) => entity.type === "player");
-  return playersNearby && (values.hospitality > 0.52 || values.sociability > 0.55 || memory.affect.loneliness > 0.42);
+  return (
+    playersNearby &&
+    memory.bootstrap_progress.shelterSecured &&
+    (values.hospitality > 0.52 ||
+      values.sociability > 0.55 ||
+      memory.affect.loneliness > 0.42 ||
+      memory.need_state.relatedness > 0.45 ||
+      memory.personality_profile.traits.extraversion > 0.62)
+  );
 }
 
 function socialDialogue(frame: PerceptionFrame, memory: MemoryState): string {
@@ -781,8 +1054,13 @@ function socialDialogue(frame: PerceptionFrame, memory: MemoryState): string {
   return `${opening} ${mood}`;
 }
 
-function maybeDelightRecall(frame: PerceptionFrame, values: ValueProfile): RecallQuery | undefined {
-  if (values.curiosity > 0.58 || values.beauty > 0.55 || frame.notable_places.length > 0) {
+function maybeDelightRecall(frame: PerceptionFrame, values: ValueProfile, memory: MemoryState): RecallQuery | undefined {
+  if (
+    values.curiosity > 0.58 ||
+    values.beauty > 0.55 ||
+    frame.notable_places.length > 0 ||
+    memory.personality_profile.traits.openness > 0.62
+  ) {
     return {
       query: frame.notable_places[0] ?? "beautiful places near home",
       tags: ["beauty", "home"],
@@ -802,10 +1080,19 @@ function pickDelightMove(
       (entry.type === "view" || entry.type === "water" || entry.type === "cave") &&
       distanceSquared(frame.position, entry.location) > 9
   );
-  if (!affordance || (values.curiosity < 0.58 && values.beauty < 0.52 && values.joy < 0.7)) {
+  if (
+    !affordance ||
+    (values.curiosity < 0.58 &&
+      values.beauty < 0.52 &&
+      values.joy < 0.7 &&
+      memory.personality_profile.traits.openness < 0.62)
+  ) {
     return undefined;
   }
   if (memory.protected_areas.some((area) => distanceSquared(area.center, affordance.location) <= area.radius * area.radius)) {
+    return undefined;
+  }
+  if (memory.mind_state.routinePhase === "dusk" || memory.mind_state.routinePhase === "night") {
     return undefined;
   }
   return {
@@ -816,7 +1103,10 @@ function pickDelightMove(
   };
 }
 
-function pickBootstrapIntent(frame: PerceptionFrame): SurvivalIntentPlan | undefined {
+function pickEmergencyBootstrapIntent(frame: PerceptionFrame, memory: MemoryState): SurvivalIntentPlan | undefined {
+  if (memory.bootstrap_progress.foodSecured) {
+    return undefined;
+  }
   const treeAffordance = nearestAffordance(frame, ["tree"]);
   if (treeAffordance) {
     return {
@@ -836,7 +1126,7 @@ function pickBootstrapIntent(frame: PerceptionFrame): SurvivalIntentPlan | undef
     };
   }
 
-  const scoutTarget = pickScoutTarget(frame);
+  const scoutTarget = pickScoutTarget(frame, ["water", "tree", "flat"]);
   if (!scoutTarget) {
     return undefined;
   }
@@ -858,34 +1148,6 @@ function pickBootstrapIntent(frame: PerceptionFrame): SurvivalIntentPlan | undef
   };
 }
 
-function needsBootstrapMaterials(frame: PerceptionFrame): boolean {
-  if (frame.home_state.shelterScore >= 0.55 && frame.home_state.anchor) {
-    return false;
-  }
-
-  return countItems(frame.inventory, [
-    "oak_log",
-    "spruce_log",
-    "birch_log",
-    "jungle_log",
-    "acacia_log",
-    "dark_oak_log",
-    "mangrove_log",
-    "cherry_log",
-    "oak_planks",
-    "spruce_planks",
-    "birch_planks",
-    "jungle_planks",
-    "acacia_planks",
-    "dark_oak_planks",
-    "mangrove_planks",
-    "cherry_planks",
-    "cobblestone",
-    "dirt",
-    "torch"
-  ]) < 8;
-}
-
 function nearestAffordance(
   frame: PerceptionFrame,
   types: Array<NonNullable<PerceptionFrame["terrain_affordances"]>[number]["type"]>
@@ -895,10 +1157,13 @@ function nearestAffordance(
     .sort((left, right) => distanceSquared(frame.position, left.location) - distanceSquared(frame.position, right.location))[0];
 }
 
-function pickScoutTarget(frame: PerceptionFrame): { location: Vec3; label: string } | undefined {
+function pickScoutTarget(
+  frame: PerceptionFrame,
+  preferredTypes: Array<NonNullable<PerceptionFrame["terrain_affordances"]>[number]["type"]> = ["tree", "water", "flat", "view"]
+): { location: Vec3; label: string } | undefined {
   const candidateAffordance = frame.terrain_affordances
-    ?.filter((entry) => entry.type !== "hazard" && entry.type !== "cave")
-    .sort((left, right) => distanceSquared(frame.position, right.location) - distanceSquared(frame.position, left.location))
+    ?.filter((entry) => entry.type !== "hazard" && entry.type !== "cave" && preferredTypes.includes(entry.type))
+    .sort((left, right) => distanceSquared(frame.position, left.location) - distanceSquared(frame.position, right.location))
     .find((entry) => distanceSquared(frame.position, entry.location) > 9);
 
   if (candidateAffordance) {
@@ -921,6 +1186,250 @@ function pickScoutTarget(frame: PerceptionFrame): { location: Vec3; label: strin
     location: candidateBlock.position,
     label: candidateBlock.name.replace(/_/g, " ")
   };
+}
+
+function craftCandidate(frame: PerceptionFrame, goal: CraftGoal, baseScore: number): DailyCandidatePlan {
+  return {
+    kind: "craft",
+    family: `craft:${goal.target_item}`,
+    baseScore,
+    intent: {
+      agent_id: frame.agent_id,
+      intent_type: "craft",
+      target: goal.target_item,
+      reason: `Craft ${goal.target_item} to support ${goal.purpose}.`,
+      priority: 3,
+      cancel_conditions: ["materials unavailable", "night emergency"],
+      success_conditions: [`${goal.quantity} ${goal.target_item} crafted`],
+      dialogue: `I want to make ${goal.target_item} next.`
+    },
+    observationCategory: "crafting",
+    observationSummary: `A useful next step is ${goal.target_item}.`,
+    observationTags: ["craft", goal.target_item],
+    project: {
+      title: `Craft ${goal.target_item}`,
+      kind: "craft",
+      status: "active",
+      summary: goal.purpose,
+      location: frame.home_state.anchor ?? frame.position
+    },
+    craftGoal: goal
+  };
+}
+
+function safeCraftPlan(
+  planner: CraftPlanner,
+  targetItem: string,
+  quantity: number,
+  purpose: string,
+  frame: PerceptionFrame
+): CraftGoal | undefined {
+  try {
+    return planner.plan(targetItem, quantity, purpose, frame);
+  } catch {
+    return undefined;
+  }
+}
+
+function isCraftGoalReady(goal: CraftGoal, frame: PerceptionFrame): boolean {
+  if (Object.keys(goal.missing_inputs).length > 0) {
+    return false;
+  }
+  return goal.required_stations.every((station) => {
+    if (station === "crafting_table") {
+      return frame.home_state.workshopReady || frame.workstation_state?.craftingTableNearby || (frame.inventory.crafting_table ?? 0) > 0;
+    }
+    if (station === "furnace") {
+      return frame.workstation_state?.furnaceNearby || (frame.inventory.furnace ?? 0) > 0;
+    }
+    return true;
+  });
+}
+
+function scoreCandidate(
+  candidate: DailyCandidatePlan,
+  frame: PerceptionFrame,
+  memory: MemoryState,
+  values: ValueProfile
+): number {
+  const phase = memory.mind_state.routinePhase;
+  const repeatedPenalty = repetitionPenalty(memory.recent_action_snapshots, candidate.family);
+  if (repeatedPenalty >= 2.5) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let score = candidate.baseScore;
+  score += phaseBias(candidate.kind, phase);
+  score += needBias(candidate.kind, memory);
+  score += personalityBias(candidate.kind, memory);
+  score += valueBias(candidate.kind, values, memory);
+  score -= repeatedPenalty;
+  score -= movementCost(frame.position, candidate.intent.target);
+
+  if (frame.weather !== "clear" && candidate.kind === "explore") {
+    score -= 0.18;
+  }
+  if (frame.combat_state.hostilesNearby > 0 && ["explore", "farm", "livestock", "social"].includes(candidate.kind)) {
+    score -= 0.45;
+  }
+  if ((phase === "dusk" || phase === "night") && ["explore", "farm", "livestock"].includes(candidate.kind)) {
+    score -= 0.75;
+  }
+  if ((phase === "dusk" || phase === "night") && candidate.kind === "build" && frame.home_state.shelterScore < 0.55) {
+    score += 0.45;
+  }
+  if ((phase === "homeward" || phase === "dusk") && candidate.kind === "store" && frame.home_state.anchor) {
+    score += 0.18;
+  }
+  if (!memory.bootstrap_progress.shelterSecured && ["social", "explore", "livestock"].includes(candidate.kind)) {
+    score -= 0.35;
+  }
+  if (candidate.family === "craft:torch" && !memory.bootstrap_progress.lightSecured) {
+    score += phase === "homeward" || phase === "dusk" ? 1.05 : 0.6;
+  }
+  if (candidate.family === "craft:white_bed" && !memory.bootstrap_progress.bedSecured) {
+    score += phase === "homeward" || phase === "dusk" || phase === "night" ? 0.58 : 0.24;
+  }
+  if (candidate.family === "craft:crafting_table" && !frame.home_state.workshopReady) {
+    score += 0.36;
+  }
+  if (candidate.family === "craft:shield" && memory.recent_dangers.length > 0) {
+    score += 0.22;
+  }
+  if (candidate.kind === "build" && !memory.bootstrap_progress.lightSecured && memory.bootstrap_progress.shelterSecured) {
+    score -= 0.24;
+  }
+  return score;
+}
+
+function phaseBias(kind: DailyCandidatePlan["kind"], phase: MemoryState["mind_state"]["routinePhase"]): number {
+  const table: Record<MemoryState["mind_state"]["routinePhase"], Partial<Record<DailyCandidatePlan["kind"], number>>> = {
+    dawn: { bootstrap: 0.24, craft: 0.08, observe: 0.1, build: 0.04 },
+    work: { bootstrap: 0.18, craft: 0.16, build: 0.18, farm: 0.14, livestock: 0.08, explore: 0.04 },
+    homeward: { store: 0.18, build: 0.12, social: 0.08, craft: 0.06, explore: -0.08 },
+    dusk: { bootstrap: 0.18, build: 0.22, store: 0.14, observe: 0.1, social: -0.05, explore: -0.28, farm: -0.22, livestock: -0.2 },
+    night: { observe: 0.16, store: 0.08, craft: 0.04, build: 0.08, social: -0.12, explore: -0.45, farm: -0.4, livestock: -0.35, bootstrap: -0.08 }
+  };
+  return table[phase][kind] ?? 0;
+}
+
+function needBias(kind: DailyCandidatePlan["kind"], memory: MemoryState): number {
+  const needs = memory.need_state;
+  switch (kind) {
+    case "bootstrap":
+      return needs.safety * 0.24 + needs.competence * 0.22 + needs.hunger * 0.16;
+    case "craft":
+      return needs.competence * 0.28 + needs.autonomy * 0.1 + needs.safety * 0.08;
+    case "build":
+      return needs.safety * 0.22 + needs.competence * 0.16 + needs.beauty * 0.08;
+    case "farm":
+      return needs.hunger * 0.22 + needs.safety * 0.1;
+    case "livestock":
+      return needs.relatedness * 0.08 + needs.beauty * 0.04;
+    case "social":
+      return needs.relatedness * 0.28;
+    case "explore":
+      return needs.autonomy * 0.18 + needs.beauty * 0.12;
+    case "store":
+      return needs.safety * 0.08 + needs.competence * 0.06;
+    case "observe":
+      return memory.mind_state.frustration * 0.18 + needs.rest * 0.06;
+  }
+}
+
+function personalityBias(kind: DailyCandidatePlan["kind"], memory: MemoryState): number {
+  const { traits, motifs } = memory.personality_profile;
+  let bias = 0;
+  if (kind === "explore") {
+    bias += traits.openness * 0.24 - traits.threat_sensitivity * 0.18;
+  }
+  if (kind === "craft") {
+    bias += traits.conscientiousness * 0.18 + traits.openness * 0.08;
+  }
+  if (kind === "build") {
+    bias += traits.conscientiousness * 0.16 + traits.agreeableness * 0.05;
+  }
+  if (kind === "social") {
+    bias += traits.extraversion * 0.28 + traits.agreeableness * 0.18;
+  }
+  if (kind === "bootstrap") {
+    bias += traits.conscientiousness * 0.18 + traits.threat_sensitivity * 0.08;
+  }
+  if (kind === "farm" || kind === "livestock") {
+    bias += traits.agreeableness * 0.08 + traits.conscientiousness * 0.12;
+  }
+
+  const motifSet = new Set([motifs.primary, motifs.secondary].filter(Boolean));
+  if (motifSet.has("wanderer") && kind === "explore") {
+    bias += 0.18;
+  }
+  if (motifSet.has("homesteader") && ["build", "farm", "store"].includes(kind)) {
+    bias += 0.16;
+  }
+  if (motifSet.has("caretaker") && ["social", "livestock", "farm"].includes(kind)) {
+    bias += 0.16;
+  }
+  if (motifSet.has("tinkerer") && kind === "craft") {
+    bias += 0.18;
+  }
+  if (motifSet.has("sentinel") && ["bootstrap", "build", "craft"].includes(kind)) {
+    bias += 0.12;
+  }
+  if (motifSet.has("host") && ["social", "build"].includes(kind)) {
+    bias += kind === "social" ? 0.26 : 0.16;
+  }
+  return bias;
+}
+
+function valueBias(kind: DailyCandidatePlan["kind"], values: ValueProfile, memory: MemoryState): number {
+  switch (kind) {
+    case "build":
+      return values.craftsmanship * 0.12 + values.comfort * 0.1 + values.beauty * 0.1;
+    case "craft":
+      return values.competence * 0.14 + values.craftsmanship * 0.12;
+    case "farm":
+      return values.food_security * 0.16 + values.stewardship * 0.08;
+    case "livestock":
+      return values.stewardship * 0.12 + values.hospitality * 0.04;
+    case "social":
+      return values.hospitality * 0.16 + values.sociability * 0.14;
+    case "explore":
+      return values.curiosity * 0.18 + values.beauty * 0.08 + memory.mind_state.valence * 0.06;
+    case "bootstrap":
+      return values.survival * 0.12 + values.safety * 0.12 + values.food_security * 0.08;
+    case "store":
+      return values.comfort * 0.04 + values.competence * 0.04;
+    case "observe":
+      return 0;
+  }
+}
+
+function repetitionPenalty(recentActions: MemoryState["recent_action_snapshots"], family: string): number {
+  const recentSame = recentActions.filter((entry) => entry.target_class === family).slice(-4);
+  if (recentSame.length === 0) {
+    return 0;
+  }
+  const blocked = recentSame.filter((entry) => entry.status === "blocked" || entry.status === "failed").length;
+  const stalled = recentSame.filter((entry) => entry.position_delta < 0.75 && entry.status !== "completed").length;
+  return recentSame.length * 0.12 + blocked * 0.9 + stalled * 0.65;
+}
+
+function movementCost(
+  current: Vec3,
+  target: AgentIntent["target"]
+): number {
+  if (!target || typeof target === "string") {
+    return 0;
+  }
+  const dx = current.x - target.x;
+  const dy = current.y - target.y;
+  const dz = current.z - target.z;
+  const horizontal = Math.sqrt(dx * dx + dz * dz);
+  return horizontal / 80 + Math.abs(dy) / 16;
+}
+
+function hasTool(inventory: Record<string, number>, kind: "axe" | "pickaxe"): boolean {
+  return Object.entries(inventory).some(([name, count]) => count > 0 && name.endsWith(`_${kind}`));
 }
 
 function rememberProject(

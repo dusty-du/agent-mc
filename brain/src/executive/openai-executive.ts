@@ -64,6 +64,8 @@ export class OpenAIExecutivePlanner implements ExecutivePlanner {
                 text:
                   "You are choosing the next action for an autonomous Minecraft resident. " +
                   "Respect survival floors first: avoid lethal danger, eat when needed, sleep nightly, do not grief, and respect protected areas. " +
+                  "Stay consistent with the resident's personality, current routine phase, unmet needs, and recent failed actions. " +
+                  "Use real Minecraft survival priorities: wood, tools, shelter, light, food, then bed. " +
                   "Happiness is not a scoreboard; failure can still belong to a good life. " +
                   "Return only strict JSON."
               }
@@ -91,9 +93,14 @@ export class OpenAIExecutivePlanner implements ExecutivePlanner {
                     nearby_entities: input.perception.nearby_entities
                   },
                   memory: {
+                    personality_profile: input.memory.personality_profile,
+                    need_state: input.memory.need_state,
+                    mind_state: input.memory.mind_state,
+                    bootstrap_progress: input.memory.bootstrap_progress,
                     current_goals: input.memory.current_goals,
                     carry_over_commitments: input.memory.carry_over_commitments,
                     recent_dangers: input.memory.recent_dangers,
+                    recent_action_snapshots: input.memory.recent_action_snapshots,
                     self_narrative: input.memory.self_narrative,
                     place_tags: input.memory.place_tags
                   },

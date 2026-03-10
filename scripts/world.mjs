@@ -54,9 +54,11 @@ export function resolveWorldPaths(cwd = process.cwd(), platform = process.platfo
   const paperDir = join(runtimeDir, "paper");
   const pluginsDir = join(paperDir, "plugins");
   const pluginDataDir = join(pluginsDir, "ResidentBridge");
+  const brainDataDir = join(runtimeDir, "brain-data");
   return {
     rootDir: cwd,
     runtimeDir,
+    brainDataDir,
     paperDir,
     pluginsDir,
     pluginDataDir,
@@ -69,7 +71,9 @@ export function resolveWorldPaths(cwd = process.cwd(), platform = process.platfo
     pluginJarDestPath: join(pluginsDir, "ResidentBridge.jar"),
     pluginConfigPath: join(pluginDataDir, "config.yml"),
     eulaPath: join(paperDir, "eula.txt"),
-    serverPropertiesPath: join(paperDir, "server.properties")
+    serverPropertiesPath: join(paperDir, "server.properties"),
+    memoryStorePath: join(brainDataDir, "memory.json"),
+    sleepStorePath: join(brainDataDir, "sleep-core.json")
   };
 }
 
@@ -264,9 +268,11 @@ export async function bootstrapWorld(options = {}) {
     ...env,
     OPENAI_API_KEY: "example-openai-api-key",
     RESIDENT_BRAIN_PORT: String(config.brainPort),
+    RESIDENT_MEMORY_STORE: paths.memoryStorePath,
     RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
     RESIDENT_OPENAI_MODEL: "gpt-5.4",
-    RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model"
+    RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model",
+    RESIDENT_SLEEP_STORE: paths.sleepStorePath
   };
   const brainProcess = spawnLoggedProcess({
     name: "brain",

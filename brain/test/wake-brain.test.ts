@@ -3,6 +3,7 @@ import {
   COMBAT_ENGAGE_DISTANCE,
   DEFAULT_LIVESTOCK_STATE,
   DEFAULT_VALUE_PROFILE,
+  MemoryState,
   PerceptionFrame
 } from "@resident/shared";
 import { createMemoryState } from "../src/memory/memory-state";
@@ -231,6 +232,227 @@ describe("WakeBrain combat decisions", () => {
     expect(decision.intent.intent_type).toBe("gather");
     expect(decision.intent.target).toBe("wood");
   });
+
+  it("retreats toward shelter at dusk instead of wandering when exposed", () => {
+    const decision = new WakeBrain().decide(
+      {
+        ...basePerception,
+        tick_time: 13000,
+        home_state: {
+          anchor: undefined,
+          shelterScore: 0.25,
+          bedAvailable: false,
+          workshopReady: false,
+          guestCapacity: 0
+        },
+        safe_route_state: {
+          homeRouteKnown: false,
+          nearestShelter: { x: 4, y: 64, z: 4 },
+          nightSafeRadius: 24
+        }
+      },
+      createMemoryWith({
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          chronotype: "steady"
+        }
+      }),
+      DEFAULT_VALUE_PROFILE,
+      undefined,
+      "dusk"
+    );
+
+    expect(decision.intent.intent_type).toBe("retreat");
+    expect(decision.intent.target).toEqual({ x: 4, y: 64, z: 4 });
+  });
+
+  it("pivots away from farm after repeated blocked farm attempts", () => {
+    const memory = createMemoryWith({
+      bootstrap_progress: {
+        woodSecured: true,
+        toolsReady: true,
+        shelterSecured: true,
+        lightSecured: true,
+        foodSecured: true,
+        bedSecured: true
+      },
+      recent_action_snapshots: [
+        {
+          timestamp: "2026-03-09T12:00:00.000Z",
+          intent_type: "farm",
+          target_class: "farm",
+          status: "blocked",
+          position_delta: 0,
+          risk_context: "safe"
+        },
+        {
+          timestamp: "2026-03-09T12:04:00.000Z",
+          intent_type: "farm",
+          target_class: "farm",
+          status: "blocked",
+          position_delta: 0,
+          risk_context: "safe"
+        }
+      ]
+    });
+
+    const decision = new WakeBrain().decide(
+      {
+        ...basePerception,
+        pantry_state: {
+          ...basePerception.pantry_state,
+          emergencyReserveDays: 2
+        },
+        farm_state: {
+          ...basePerception.farm_state,
+          harvestableTiles: 3,
+          farmlandReady: true
+        }
+      },
+      memory,
+      DEFAULT_VALUE_PROFILE,
+      undefined,
+      "idle_check"
+    );
+
+    expect(decision.intent.intent_type).not.toBe("farm");
+  });
+
+  it("lets different personalities choose different believable calm actions", () => {
+    const frame = {
+      ...basePerception,
+      nearby_entities: [
+        {
+          id: "player-1",
+          name: "Alex",
+          type: "player" as const,
+          distance: 4
+        }
+      ],
+      notable_places: ["river bend"],
+      terrain_affordances: [
+        {
+          type: "view" as const,
+          location: { x: 12, y: 66, z: 6 },
+          note: "A high overlook above the river."
+        }
+      ]
+    };
+    const sharedValues = {
+      ...DEFAULT_VALUE_PROFILE,
+      curiosity: 0.82,
+      beauty: 0.76,
+      hospitality: 0.66,
+      sociability: 0.62
+    };
+
+    const hostDecision = new WakeBrain().decide(
+      frame,
+      createMemoryWith({
+        bootstrap_progress: {
+          woodSecured: true,
+          toolsReady: true,
+          shelterSecured: true,
+          lightSecured: true,
+          foodSecured: true,
+          bedSecured: true
+        },
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          traits: {
+            openness: 0.42,
+            conscientiousness: 0.6,
+            extraversion: 0.86,
+            agreeableness: 0.82,
+            threat_sensitivity: 0.35
+          },
+          motifs: {
+            primary: "host",
+            secondary: "homesteader"
+          },
+          style_tags: ["host", "warm", "gentle"]
+        }
+      }),
+      sharedValues,
+      undefined,
+      "idle_check"
+    );
+
+    const wandererDecision = new WakeBrain().decide(
+      frame,
+      createMemoryWith({
+        bootstrap_progress: {
+          woodSecured: true,
+          toolsReady: true,
+          shelterSecured: true,
+          lightSecured: true,
+          foodSecured: true,
+          bedSecured: true
+        },
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          traits: {
+            openness: 0.88,
+            conscientiousness: 0.34,
+            extraversion: 0.24,
+            agreeableness: 0.42,
+            threat_sensitivity: 0.2
+          },
+          motifs: {
+            primary: "wanderer",
+            secondary: "tinkerer"
+          },
+          style_tags: ["wanderer", "curious"]
+        }
+      }),
+      sharedValues,
+      undefined,
+      "idle_check"
+    );
+
+    expect(hostDecision.intent.intent_type).toBe("socialize");
+    expect(wandererDecision.intent.intent_type).not.toBe(hostDecision.intent.intent_type);
+  });
+
+  it("prioritizes crafting torches before dusk when light is unsecured", () => {
+    const decision = new WakeBrain().decide(
+      {
+        ...basePerception,
+        tick_time: 11800,
+        light_level: 5,
+        inventory: {
+          crafting_table: 1,
+          coal: 2,
+          stick: 4,
+          oak_planks: 8
+        },
+        home_state: {
+          ...basePerception.home_state,
+          workshopReady: false
+        }
+      },
+      createMemoryWith({
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          chronotype: "steady"
+        },
+        bootstrap_progress: {
+          woodSecured: true,
+          toolsReady: true,
+          shelterSecured: true,
+          lightSecured: false,
+          foodSecured: true,
+          bedSecured: true
+        }
+      }),
+      DEFAULT_VALUE_PROFILE,
+      undefined,
+      "idle_check"
+    );
+
+    expect(decision.intent.intent_type).toBe("craft");
+    expect(decision.intent.target).toBe("torch");
+  });
 });
 
 function withHostile(frame: PerceptionFrame, distance: number): PerceptionFrame {
@@ -252,5 +474,12 @@ function withHostile(frame: PerceptionFrame, distance: number): PerceptionFrame 
       strongestThreat: "zombie",
       shelterDistance: frame.safe_route_state.nearestShelter ? distance : undefined
     }
+  };
+}
+
+function createMemoryWith(overrides: Partial<MemoryState>): MemoryState {
+  return {
+    ...createMemoryState(),
+    ...overrides
   };
 }

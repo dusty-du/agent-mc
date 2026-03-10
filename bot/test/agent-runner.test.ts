@@ -8,6 +8,7 @@ const memoryCurrent = vi.fn();
 const memoryReplace = vi.fn();
 const memoryRemember = vi.fn();
 const memoryRememberReport = vi.fn();
+const memoryRememberActionSnapshot = vi.fn();
 const memorySyncPerception = vi.fn();
 const memoryRecall = vi.fn();
 const memoryPendingSleepWork = vi.fn();
@@ -36,6 +37,7 @@ vi.mock("@resident/brain", () => {
     replace = memoryReplace;
     remember = memoryRemember;
     rememberReport = memoryRememberReport;
+    rememberActionSnapshot = memoryRememberActionSnapshot;
     syncPerception = memorySyncPerception;
     recall = memoryRecall;
     buildBundle = vi.fn();
@@ -99,6 +101,7 @@ describe("ResidentAgentRunner", () => {
     memoryReplace.mockReset();
     memoryRemember.mockReset();
     memoryRememberReport.mockReset();
+    memoryRememberActionSnapshot.mockReset();
     memorySyncPerception.mockReset();
     memoryRecall.mockReset();
     memoryPendingSleepWork.mockReset();
@@ -129,6 +132,7 @@ describe("ResidentAgentRunner", () => {
     memoryReplace.mockResolvedValue(baseMemory);
     memoryRemember.mockResolvedValue(baseMemory);
     memoryRememberReport.mockResolvedValue(baseMemory);
+    memoryRememberActionSnapshot.mockResolvedValue(baseMemory);
     memoryRecall.mockResolvedValue({
       query: {
         query: "beautiful home",
@@ -192,6 +196,7 @@ describe("ResidentAgentRunner", () => {
 
     expect(memoryCtorArgs[0]?.[1]).toBe(sleepCtorArgs[0]?.[0]);
     expect(sleepCtorArgs[0]?.[1]).toBe(createSleepConsolidatorFromEnv.mock.results[0]?.value);
+    expect(memoryRememberActionSnapshot).toHaveBeenCalledOnce();
     expect(memoryRecall).toHaveBeenCalledOnce();
     expect(memoryRecall).toHaveBeenCalledWith({
       query: "beautiful home",
@@ -237,6 +242,7 @@ describe("ResidentAgentRunner", () => {
     memoryReplace.mockResolvedValue(baseMemory);
     memoryRemember.mockResolvedValue(baseMemory);
     memoryRememberReport.mockResolvedValue(baseMemory);
+    memoryRememberActionSnapshot.mockResolvedValue(baseMemory);
     executiveDecide
       .mockResolvedValueOnce({
         intent: {
@@ -308,6 +314,13 @@ describe("ResidentAgentRunner", () => {
     await runner.run();
 
     expect(executiveDecide).toHaveBeenCalledTimes(2);
+    expect(memoryRememberActionSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent_type: "fight",
+        target_class: "fight",
+        status: "blocked"
+      })
+    );
     expect(executiveDecide.mock.calls[1]?.[4]).toBe("task_failure");
   });
 });
@@ -315,6 +328,48 @@ describe("ResidentAgentRunner", () => {
 function createMemory(): MemoryState {
   return {
     current_day: 1,
+    personality_profile: {
+      seed: "resident-seed",
+      traits: {
+        openness: 0.5,
+        conscientiousness: 0.6,
+        extraversion: 0.4,
+        agreeableness: 0.55,
+        threat_sensitivity: 0.45
+      },
+      chronotype: "steady",
+      motifs: {
+        primary: "homesteader",
+        secondary: "tinkerer"
+      },
+      style_tags: ["homesteader", "steady"],
+      updated_at: "2026-03-09T11:00:00.000Z"
+    },
+    need_state: {
+      safety: 0.3,
+      rest: 0.2,
+      hunger: 0.2,
+      autonomy: 0.4,
+      competence: 0.4,
+      relatedness: 0.25,
+      beauty: 0.3
+    },
+    mind_state: {
+      valence: 0.55,
+      arousal: 0.3,
+      confidence: 0.45,
+      frustration: 0.1,
+      fatigueDebt: 0.2,
+      routinePhase: "work"
+    },
+    bootstrap_progress: {
+      woodSecured: true,
+      toolsReady: true,
+      shelterSecured: true,
+      lightSecured: true,
+      foodSecured: true,
+      bedSecured: true
+    },
     known_beds: [],
     workstation_state: {
       craftingTableNearby: false,
@@ -340,6 +395,7 @@ function createMemory(): MemoryState {
     recent_observations: [],
     recent_interactions: [],
     recent_dangers: [],
+    recent_action_snapshots: [],
     place_tags: [],
     affect: {
       mood: 0.6,

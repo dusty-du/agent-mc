@@ -93,14 +93,14 @@ export function deriveStyleTags(
 }
 
 function selectMotifs(traits: ResidentTraitProfile): ResidentPersonalityProfile["motifs"] {
-  const scores: Array<{ motif: ResidentMotif; score: number }> = [
+  const scores = ([
     { motif: "homesteader", score: traits.conscientiousness * 0.7 + traits.agreeableness * 0.3 },
     { motif: "wanderer", score: traits.openness * 0.85 + (1 - traits.threat_sensitivity) * 0.15 },
     { motif: "caretaker", score: traits.agreeableness * 0.75 + traits.conscientiousness * 0.25 },
     { motif: "tinkerer", score: traits.openness * 0.45 + traits.conscientiousness * 0.55 },
     { motif: "sentinel", score: traits.threat_sensitivity * 0.7 + traits.conscientiousness * 0.3 },
     { motif: "host", score: traits.extraversion * 0.55 + traits.agreeableness * 0.45 }
-  ].sort((left, right) => right.score - left.score);
+  ] satisfies Array<{ motif: ResidentMotif; score: number }>).sort((left, right) => right.score - left.score);
 
   const [primary, ...rest] = scores;
   const secondary = rest.find((entry) => entry.motif !== primary.motif);

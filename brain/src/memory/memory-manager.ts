@@ -7,6 +7,7 @@ import {
   OvernightConsolidation,
   PerceptionFrame,
   ProtectedArea,
+  RecentActionSnapshot,
   RecallQuery,
   RecallResult,
   WakeOrientation
@@ -17,6 +18,7 @@ import {
   applyWakeOrientation,
   buildMemoryBundle,
   mergeProtectedAreas,
+  rememberActionSnapshot,
   rememberActionReport,
   rememberObservation,
   syncMemoryState,
@@ -58,6 +60,13 @@ export class MemoryManager {
   async rememberReport(report: ActionReport): Promise<MemoryState> {
     const data = await this.store.load();
     data.memory = rememberActionReport(data.memory, report);
+    await this.store.save(data);
+    return data.memory;
+  }
+
+  async rememberActionSnapshot(snapshot: RecentActionSnapshot): Promise<MemoryState> {
+    const data = await this.store.load();
+    data.memory = rememberActionSnapshot(data.memory, snapshot);
     await this.store.save(data);
     return data.memory;
   }

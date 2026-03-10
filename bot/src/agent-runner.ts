@@ -18,6 +18,7 @@ import {
   OvernightConsolidation,
   PerceptionFrame,
   ProtectedArea,
+  RecentActionSnapshot,
   ReplanTrigger,
   ValueProfile
 } from "@resident/shared";
@@ -138,6 +139,9 @@ export class ResidentAgentRunner {
       await this.memory.syncPerception(nextPerception, latestOvernight);
       if (report) {
         await this.memory.rememberReport(report);
+        await this.memory.rememberActionSnapshot(
+          buildActionSnapshot(previousPerception, nextPerception, decision.intent, report)
+        );
         this.daily.recordReport(report);
       }
       this.daily.recordPerception(nextPerception);
@@ -435,6 +439,15 @@ function residentLog(event: string, payload: Record<string, unknown>): void {
 function mergeMemoryState(primary: MemoryState, latest: MemoryState): MemoryState {
   return {
     ...primary,
+    personality_profile: {
+      ...primary.personality_profile,
+      traits: { ...primary.personality_profile.traits },
+      motifs: { ...primary.personality_profile.motifs },
+      style_tags: [...primary.personality_profile.style_tags]
+    },
+    need_state: { ...primary.need_state },
+    mind_state: { ...primary.mind_state },
+    bootstrap_progress: { ...primary.bootstrap_progress },
     home_anchor: primary.home_anchor ?? latest.home_anchor,
     known_beds: mergeVecs(primary.known_beds, latest.known_beds),
     storage_sites: mergeByLocation(primary.storage_sites, latest.storage_sites),
@@ -454,6 +467,7 @@ function mergeMemoryState(primary: MemoryState, latest: MemoryState): MemoryStat
     recent_observations: mergeObservations(primary.recent_observations, latest.recent_observations),
     recent_interactions: mergeStrings(primary.recent_interactions, latest.recent_interactions, 10),
     recent_dangers: mergeStrings(primary.recent_dangers, latest.recent_dangers, 10),
+    recent_action_snapshots: mergeActionSnapshots(primary.recent_action_snapshots, latest.recent_action_snapshots),
     place_tags: mergeStrings(primary.place_tags, latest.place_tags, 12),
     self_narrative: mergeStrings(primary.self_narrative, latest.self_narrative, 12),
     carry_over_commitments: mergeStrings(primary.carry_over_commitments, latest.carry_over_commitments, 10),
@@ -506,6 +520,14 @@ function mergeObservations(primary: MemoryObservation[], latest: MemoryObservati
   return [...merged.values()].slice(-24);
 }
 
+function mergeActionSnapshots(primary: RecentActionSnapshot[], latest: RecentActionSnapshot[]): RecentActionSnapshot[] {
+  const merged = new Map<string, RecentActionSnapshot>();
+  for (const snapshot of [...latest, ...primary]) {
+    merged.set(`${snapshot.timestamp}:${snapshot.intent_type}:${snapshot.target_class}`, snapshot);
+  }
+  return [...merged.values()].slice(-16);
+}
+
 function mergeCraftGoals(primary: MemoryState["craft_backlog"], latest: MemoryState["craft_backlog"]): MemoryState["craft_backlog"] {
   const merged = new Map<string, MemoryState["craft_backlog"][number]>();
   for (const goal of [...latest, ...primary]) {
@@ -520,4 +542,56 @@ function mergeBuildIntents(primary: MemoryState["build_backlog"], latest: Memory
     merged.set(`${intent.purpose}:${intent.rebuild_of ?? "new"}`, intent);
   }
   return [...merged.values()];
+}
+
+function buildActionSnapshot(
+  previous: PerceptionFrame,
+  current: PerceptionFrame,
+  intent: { intent_type: string; target?: string | { x: number; y: number; z: number } },
+  report: ActionReport
+): RecentActionSnapshot {
+  return {
+    timestamp: new Date().toISOString(),
+    intent_type: report.intent_type,
+    target_class: classifyActionTarget(intent.intent_type, intent.target),
+    status: report.status,
+    position_delta: distance(previous.position, current.position),
+    risk_context: classifyRiskContext(current)
+  };
+}
+
+function classifyActionTarget(
+  intentType: string,
+  target?: string | { x: number; y: number; z: number }
+): string {
+  if (typeof target === "string" && target.trim().length > 0) {
+    return `${intentType}:${target}`;
+  }
+  if (target && typeof target === "object") {
+    return `${intentType}:${Math.round(target.x)}:${Math.round(target.y)}:${Math.round(target.z)}`;
+  }
+  return intentType;
+}
+
+function classifyRiskContext(frame: PerceptionFrame): RecentActionSnapshot["risk_context"] {
+  if (frame.combat_state.hostilesNearby > 0) {
+    return "threatened";
+  }
+  if (frame.home_state.shelterScore >= 0.65) {
+    return "sheltered";
+  }
+  if (frame.light_level <= 7 || frame.home_state.shelterScore < 0.45) {
+    return "exposed";
+  }
+  return "safe";
+}
+
+function distance(
+  left: { x: number; y: number; z: number },
+  right: { x: number; y: number; z: number }
+): number {
+  const dx = left.x - right.x;
+  const dy = left.y - right.y;
+  const dz = left.z - right.z;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }

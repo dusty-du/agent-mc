@@ -1,13 +1,24 @@
 import {
   ActionReport,
   AffectState,
+  BootstrapProgress,
   MemoryBundle,
   MemoryObservation,
   MemoryState,
   OvernightConsolidation,
   PerceptionFrame,
   ProtectedArea,
+  RecentActionSnapshot,
+  ResidentChronotype,
+  ResidentMindState,
+  ResidentNeedState,
   WakeOrientation
+} from "@resident/shared";
+import {
+  createResidentPersonality,
+  DEFAULT_BOOTSTRAP_PROGRESS,
+  DEFAULT_MIND_STATE,
+  DEFAULT_NEED_STATE
 } from "@resident/shared";
 
 function defaultAffect(): AffectState {
@@ -29,6 +40,10 @@ function nowIso(): string {
 export function createMemoryState(): MemoryState {
   return {
     current_day: 0,
+    personality_profile: createResidentPersonality(),
+    need_state: { ...DEFAULT_NEED_STATE },
+    mind_state: { ...DEFAULT_MIND_STATE },
+    bootstrap_progress: { ...DEFAULT_BOOTSTRAP_PROGRESS },
     known_beds: [],
     workstation_state: {
       craftingTableNearby: false,
@@ -54,6 +69,7 @@ export function createMemoryState(): MemoryState {
     recent_observations: [],
     recent_interactions: [],
     recent_dangers: [],
+    recent_action_snapshots: [],
     place_tags: [],
     affect: defaultAffect(),
     self_narrative: ["I am here to live, learn, and shape a world worth returning to."],
@@ -67,6 +83,7 @@ export function syncMemoryState(
   perception: PerceptionFrame,
   overnight?: OvernightConsolidation
 ): MemoryState {
+  const personality = overnight?.personality_profile ?? memory.personality_profile;
   const knownBeds = perception.home_state.anchor
     ? dedupePositions([perception.home_state.anchor, ...memory.known_beds])
     : [...memory.known_beds];
@@ -76,10 +93,18 @@ export function syncMemoryState(
   const routesHome = perception.home_state.anchor
     ? dedupePositions([perception.home_state.anchor, ...memory.routes_home])
     : [...memory.routes_home];
+  const affect = deriveAffect(perception, memory.affect);
+  const bootstrapProgress = deriveBootstrapProgress(perception);
+  const needState = deriveNeedState(perception, affect, bootstrapProgress, memory.need_state);
+  const mindState = deriveMindState(perception, affect, needState, memory.recent_action_snapshots, personality.chronotype);
 
   const next: MemoryState = {
     ...memory,
     current_day: Math.floor(perception.tick_time / 24000),
+    personality_profile: personality,
+    need_state: needState,
+    mind_state: mindState,
+    bootstrap_progress: bootstrapProgress,
     home_anchor: perception.home_state.anchor ?? memory.home_anchor,
     known_beds: knownBeds,
     workstation_state: {
@@ -113,7 +138,7 @@ export function syncMemoryState(
       ...perception.notable_places,
       ...(perception.home_state.shelterScore > 0.6 ? ["home"] : [])
     ]),
-    affect: deriveAffect(perception, memory.affect),
+    affect,
     carry_over_commitments: overnight
       ? trimUnique([...overnight.carry_over_commitments, ...memory.carry_over_commitments])
       : [...memory.carry_over_commitments],
@@ -192,6 +217,14 @@ export function rememberActionReport(memory: MemoryState, report: ActionReport):
   };
 }
 
+export function rememberActionSnapshot(memory: MemoryState, snapshot: RecentActionSnapshot): MemoryState {
+  return {
+    ...memory,
+    recent_action_snapshots: trim([...memory.recent_action_snapshots, snapshot], 16),
+    last_updated_at: nowIso()
+  };
+}
+
 export function updateProtectedAreas(memory: MemoryState, protectedAreas: ProtectedArea[]): MemoryState {
   return {
     ...memory,
@@ -224,11 +257,16 @@ export function buildMemoryBundle(memory: MemoryState, agentId: string): MemoryB
       currentDayObservations.at(-1)?.summary ??
       memory.self_narrative.at(-1) ??
       "A day of living, trying, and continuing.",
+    personality_profile: { ...memory.personality_profile, traits: { ...memory.personality_profile.traits }, motifs: { ...memory.personality_profile.motifs }, style_tags: [...memory.personality_profile.style_tags] },
+    need_state: { ...memory.need_state },
+    mind_state: { ...memory.mind_state },
+    bootstrap_progress: { ...memory.bootstrap_progress },
     observations: currentDayObservations,
     active_projects: [...memory.active_projects],
     carry_over_commitments: [...memory.carry_over_commitments],
     recent_dangers: [...memory.recent_dangers],
     recent_interactions: [...memory.recent_interactions],
+    recent_action_snapshots: [...memory.recent_action_snapshots],
     place_tags: [...memory.place_tags],
     final_affect: { ...memory.affect }
   };
@@ -273,6 +311,73 @@ function deriveAffect(frame: PerceptionFrame, current: AffectState): AffectState
   };
 }
 
+function deriveBootstrapProgress(frame: PerceptionFrame): BootstrapProgress {
+  const inventory = frame.inventory;
+  const woodCount = countItems(inventory, woodItems);
+  const toolReady = hasTool(inventory, "axe") && hasTool(inventory, "pickaxe");
+  const torchesNearby = frame.nearby_blocks.some((block) => block.name.includes("torch") || block.name.includes("lantern"));
+  return {
+    woodSecured: woodCount >= 8 || Boolean(inventory.crafting_table) || frame.home_state.workshopReady,
+    toolsReady: toolReady,
+    shelterSecured: frame.home_state.shelterScore >= 0.55 || Boolean(frame.home_state.anchor),
+    lightSecured: countItems(inventory, ["torch", "lantern"]) >= 4 || torchesNearby || frame.light_level >= 10,
+    foodSecured: frame.pantry_state.emergencyReserveDays >= 1 || hasKnownFood(inventory) || frame.farm_state.harvestableTiles > 0,
+    bedSecured: frame.home_state.bedAvailable || inventory.white_bed > 0 || inventory.red_bed > 0 || inventory.blue_bed > 0
+  };
+}
+
+function deriveNeedState(
+  frame: PerceptionFrame,
+  affect: AffectState,
+  bootstrap: BootstrapProgress,
+  current: ResidentNeedState
+): ResidentNeedState {
+  const next: ResidentNeedState = {
+    safety: clampAverage(
+      current.safety,
+      clamp01(
+        1 -
+        (frame.home_state.shelterScore * 0.45 + Math.min(frame.light_level / 15, 1) * 0.2) +
+        frame.combat_state.hostilesNearby * 0.18 +
+        (bootstrap.lightSecured ? -0.08 : 0.08)
+      )
+    ),
+    rest: clampAverage(
+      current.rest,
+      clamp01(routinePhaseFatigue(frame.tick_time, frame.home_state.bedAvailable) + (frame.home_state.bedAvailable ? -0.08 : 0.08))
+    ),
+    hunger: clampAverage(
+      current.hunger,
+      clamp01((20 - frame.hunger) / 20 + (frame.pantry_state.emergencyReserveDays < 1 ? 0.35 : frame.pantry_state.emergencyReserveDays < 2 ? 0.15 : 0))
+    ),
+    autonomy: clampAverage(current.autonomy, clamp01(0.45 + (frame.notable_places.length === 0 ? 0.1 : -0.05) + (bootstrap.shelterSecured ? 0.05 : 0))),
+    competence: clampAverage(current.competence, clamp01((bootstrap.toolsReady ? 0.22 : 0.62) + (bootstrap.woodSecured ? -0.08 : 0.12))),
+    relatedness: clampAverage(current.relatedness, clamp01(frame.nearby_entities.some((entity) => entity.type === "player") ? 0.18 : affect.loneliness + 0.08)),
+    beauty: clampAverage(current.beauty, clamp01(frame.notable_places.length > 0 ? 0.28 : 0.52))
+  };
+  return next;
+}
+
+function deriveMindState(
+  frame: PerceptionFrame,
+  affect: AffectState,
+  needs: ResidentNeedState,
+  recentActions: RecentActionSnapshot[],
+  chronotype: ResidentChronotype
+): ResidentMindState {
+  const recentBlocked = recentActions.filter((entry) => entry.status === "blocked" || entry.position_delta < 0.75).slice(-4).length;
+  const recentSuccess = recentActions.filter((entry) => entry.status === "completed" && entry.position_delta >= 0.75).slice(-4).length;
+  const routinePhase = phaseForTick(frame.tick_time, chronotype);
+  return {
+    valence: clamp01((affect.mood + affect.satisfaction + affect.belonging) / 3 - recentBlocked * 0.05),
+    arousal: clamp01((affect.stress + needs.safety + (frame.combat_state.hostilesNearby > 0 ? 0.25 : 0.1)) / 2),
+    confidence: clamp01(0.4 + recentSuccess * 0.08 - recentBlocked * 0.06 + (frame.combat_state.weaponTier === "none" ? -0.08 : 0.06)),
+    frustration: clamp01(needs.competence * 0.5 + recentBlocked * 0.12),
+    fatigueDebt: clamp01(needs.rest + (routinePhase === "night" ? 0.15 : routinePhase === "dusk" ? 0.08 : 0)),
+    routinePhase
+  };
+}
+
 function clampAverage(current: number, next: number): number {
   return Math.max(0, Math.min(1, (current + next) / 2));
 }
@@ -298,6 +403,74 @@ function trimUnique(entries: string[], limit = 10): string[] {
   const unique = [...new Set(entries)];
   return unique.slice(-limit);
 }
+
+function phaseForTick(tick: number, chronotype: ResidentChronotype): ResidentMindState["routinePhase"] {
+  const offset = chronotype === "early" ? 1000 : chronotype === "late" ? -1000 : 0;
+  const adjusted = ((tick + offset) % 24000 + 24000) % 24000;
+  if (adjusted >= 23000 || adjusted < 2000) {
+    return "dawn";
+  }
+  if (adjusted < 11000) {
+    return "work";
+  }
+  if (adjusted < 12500) {
+    return "homeward";
+  }
+  if (adjusted < 14000) {
+    return "dusk";
+  }
+  return "night";
+}
+
+function routinePhaseFatigue(tick: number, bedAvailable: boolean): number {
+  const daytime = tick % 24000;
+  if (daytime >= 12500 && bedAvailable) {
+    return 0.72;
+  }
+  if (daytime >= 11000) {
+    return 0.58;
+  }
+  if (daytime < 2000) {
+    return 0.42;
+  }
+  return 0.26;
+}
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function hasTool(inventory: Record<string, number>, kind: "axe" | "pickaxe"): boolean {
+  return Object.entries(inventory).some(([name, count]) => count > 0 && name.endsWith(`_${kind}`));
+}
+
+function hasKnownFood(inventory: Record<string, number>): boolean {
+  return countItems(inventory, ["bread", "baked_potato", "cooked_beef", "cooked_mutton", "cooked_porkchop", "cooked_chicken", "carrot", "apple"]) > 0;
+}
+
+function countItems(inventory: Record<string, number>, names: string[]): number {
+  return names.reduce((sum, name) => sum + (inventory[name] ?? 0), 0);
+}
+
+const woodItems = [
+  "oak_log",
+  "spruce_log",
+  "birch_log",
+  "jungle_log",
+  "acacia_log",
+  "dark_oak_log",
+  "mangrove_log",
+  "cherry_log",
+  "oak_planks",
+  "spruce_planks",
+  "birch_planks",
+  "jungle_planks",
+  "acacia_planks",
+  "dark_oak_planks",
+  "mangrove_planks",
+  "cherry_planks",
+  "stick"
+];
 
 type Vec3Like = {
   x: number;

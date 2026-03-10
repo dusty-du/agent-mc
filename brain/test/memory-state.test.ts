@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rememberActionReport, rememberObservation } from "../src/memory/memory-state";
+import { buildMemoryBundle, rememberActionReport, rememberActionSnapshot, rememberObservation } from "../src/memory/memory-state";
 import { createMemoryState } from "../src/memory/memory-state";
 
 describe("memory-state", () => {
@@ -56,5 +56,28 @@ describe("memory-state", () => {
 
     expect(updated.active_projects[0]?.status).toBe("complete");
     expect(updated.self_narrative.at(-1)).toContain("Placed the new roofline.");
+  });
+
+  it("persists recent action snapshots and exposes new psychology state in the memory bundle", () => {
+    let memory = createMemoryState();
+
+    for (let index = 0; index < 18; index += 1) {
+      memory = rememberActionSnapshot(memory, {
+        timestamp: `2026-03-09T12:${String(index).padStart(2, "0")}:00.000Z`,
+        intent_type: "move",
+        target_class: `move:${index}`,
+        status: "completed",
+        position_delta: 2,
+        risk_context: "safe"
+      });
+    }
+
+    const bundle = buildMemoryBundle(memory, "resident-1");
+
+    expect(memory.recent_action_snapshots).toHaveLength(16);
+    expect(bundle.personality_profile.seed).toBe(memory.personality_profile.seed);
+    expect(bundle.need_state).toEqual(memory.need_state);
+    expect(bundle.bootstrap_progress).toEqual(memory.bootstrap_progress);
+    expect(bundle.recent_action_snapshots).toHaveLength(16);
   });
 });

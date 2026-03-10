@@ -88,13 +88,20 @@ describe("SemanticBuildPlanner", () => {
 });
 
 describe("WakeBrain", () => {
-  it("prioritizes food when reserves are low", () => {
+  it("shifts into concrete survival bootstrap when reserves are low", () => {
     const brain = new WakeBrain();
     const decision = brain.decide(
       {
         ...basePerception,
         hunger: 6,
-        pantry_state: { ...basePerception.pantry_state, emergencyReserveDays: 0.2 }
+        pantry_state: { ...basePerception.pantry_state, emergencyReserveDays: 0.2 },
+        terrain_affordances: [
+          {
+            type: "tree",
+            location: { x: 6, y: 64, z: 0 },
+            note: "A small stand of trees nearby."
+          }
+        ]
       },
       createMemoryState(),
       DEFAULT_VALUE_PROFILE,
@@ -102,7 +109,8 @@ describe("WakeBrain", () => {
       "hunger_threshold"
     );
 
-    expect(["eat", "farm"]).toContain(decision.intent.intent_type);
+    expect(decision.intent.intent_type).toBe("gather");
+    expect(decision.intent.target).toBe("wood");
   });
 
   it("creates a wake orientation from immediate reality plus overnight memory", () => {
@@ -120,6 +128,7 @@ describe("WakeBrain", () => {
         day_number: 0,
         created_at: new Date().toISOString(),
         summary: "A difficult but meaningful day.",
+        personality_profile: createMemoryState().personality_profile,
         insights: ["Failure can still be part of a good life."],
         carry_over_commitments: ["repair the home entrance"],
         risk_themes: ["Hostiles near the tree line."],
