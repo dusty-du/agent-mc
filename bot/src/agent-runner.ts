@@ -2,11 +2,12 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createOpenAIExecutivePlannerFromEnv,
-  createOpenAISleepConsolidatorFromEnv,
+  createOpenAIReflectiveConsolidatorFromEnv,
   createResidentBrainServer,
   FileBackedMemoryStore,
   FileBackedSleepStore,
   MemoryManager,
+  rememberDayLifeReflection,
   ResidentExecutive,
   SleepCore
 } from "@resident/brain";
@@ -36,6 +37,18 @@ export interface ResidentAgentRunnerConfig extends LiveMineflayerDriverConfig {
   sleepStorePath?: string;
 }
 
+interface DayReflectionCandidate {
+  trigger: ReplanTrigger;
+  priority: "hard" | "soft";
+  fingerprint: string;
+  previousPerception: PerceptionFrame;
+  currentPerception: PerceptionFrame;
+  report?: ActionReport;
+  recentActionSnapshot?: RecentActionSnapshot;
+  memory: MemoryState;
+  overnight?: OvernightConsolidation;
+}
+
 export class ResidentAgentRunner {
   private readonly presentation = new ResidentPresentationController();
   private readonly driver: LiveMineflayerDriver;
@@ -52,6 +65,10 @@ export class ResidentAgentRunner {
   private pendingTrigger: ReplanTrigger = "spawn";
   private daily = new DailyAccumulator();
   private presentationSync = Promise.resolve();
+  private dayReflectionInFlight?: Promise<void>;
+  private queuedHardDayReflection?: DayReflectionCandidate;
+  private queuedSoftDayReflection?: DayReflectionCandidate;
+  private readonly softReflectionCooldowns = new Map<string, number>();
 
   constructor(private readonly config: ResidentAgentRunnerConfig) {
     this.driver = new LiveMineflayerDriver({
@@ -70,7 +87,7 @@ export class ResidentAgentRunner {
       new FileBackedMemoryStore(config.memoryStorePath ?? process.env.RESIDENT_MEMORY_STORE ?? `${process.cwd()}/brain/.resident-data/memory.json`),
       sleepStore
     );
-    this.sleepCore = new SleepCore(sleepStore, createOpenAISleepConsolidatorFromEnv());
+    this.sleepCore = new SleepCore(sleepStore, createOpenAIReflectiveConsolidatorFromEnv());
   }
 
   async run(): Promise<void> {
@@ -102,7 +119,9 @@ export class ResidentAgentRunner {
     while (!this.stopped) {
       ({ latestOvernight, values } = await this.flushPendingSleepWork(latestOvernight, values));
       const currentMemory = await this.memory.current();
-      const trigger = currentMemory.emotion_core.pending_interrupt?.trigger ?? this.pendingTrigger;
+      const emotionTrigger = currentMemory.emotion_core.pending_interrupt?.trigger;
+      const trigger = emotionTrigger ?? this.pendingTrigger;
+      const shouldClearEmotionTrigger = emotionTrigger === trigger;
       residentLog("planning_turn", {
         trigger,
         day: currentMemory.current_day,
@@ -123,7 +142,7 @@ export class ResidentAgentRunner {
       }
       const latestMemory = await this.memory.current();
       const mergedMemory = mergeMemoryState(
-        trigger === "death" || trigger === "respawn"
+        shouldClearEmotionTrigger
           ? {
               ...decision.memory,
               emotion_core: {
@@ -135,7 +154,7 @@ export class ResidentAgentRunner {
         latestMemory
       );
       await this.memory.replace(
-        trigger === "death" || trigger === "respawn"
+        shouldClearEmotionTrigger
           ? {
               ...mergedMemory,
               emotion_core: {
@@ -171,6 +190,8 @@ export class ResidentAgentRunner {
         }
       }
 
+      const preActionMemory = await this.memory.current();
+
       const context: IntentExecutionContext = {
         craftGoal: decision.craftGoal,
         buildPlan: decision.buildPlan
@@ -185,14 +206,17 @@ export class ResidentAgentRunner {
         notes: report?.notes ?? []
       });
       await this.memory.syncPerception(nextPerception, latestOvernight);
+      let recentActionSnapshot: RecentActionSnapshot | undefined;
       if (report) {
         await this.memory.rememberReport(report);
+        recentActionSnapshot = buildActionSnapshot(previousPerception, nextPerception, decision.intent, report);
         await this.memory.rememberActionSnapshot(
-          buildActionSnapshot(previousPerception, nextPerception, decision.intent, report)
+          recentActionSnapshot
         );
         this.daily.recordReport(report);
       }
       this.daily.recordPerception(nextPerception);
+      const postTurnMemory = await this.memory.current();
 
       if (decision.intent.intent_type === "sleep" && report?.status === "completed") {
         const bundle = await this.memory.buildBundle(nextPerception.agent_id);
@@ -230,7 +254,21 @@ export class ResidentAgentRunner {
         this.pendingTrigger = "wake";
         this.daily.reset();
       } else {
-        this.pendingTrigger = classifyTrigger(previousPerception, nextPerception, report, trigger);
+        const nextTrigger = classifyTrigger(previousPerception, nextPerception, report, trigger);
+        this.pendingTrigger = nextTrigger;
+        this.queueDayReflection(
+          this.prePlanLifeGate({
+            turnTrigger: trigger,
+            nextTrigger,
+            beforeMemory: preActionMemory,
+            afterMemory: postTurnMemory,
+            previousPerception,
+            currentPerception: nextPerception,
+            report,
+            recentActionSnapshot,
+            overnight: latestOvernight
+          })
+        );
       }
 
       previousPerception = nextPerception;
@@ -277,6 +315,114 @@ export class ResidentAgentRunner {
       });
 
     return this.presentationSync;
+  }
+
+  private prePlanLifeGate(input: {
+    turnTrigger: ReplanTrigger;
+    nextTrigger: ReplanTrigger;
+    beforeMemory: MemoryState;
+    afterMemory: MemoryState;
+    previousPerception: PerceptionFrame;
+    currentPerception: PerceptionFrame;
+    report?: ActionReport;
+    recentActionSnapshot?: RecentActionSnapshot;
+    overnight?: OvernightConsolidation;
+  }): DayReflectionCandidate | undefined {
+    const trigger = selectDayReflectionTrigger(input.turnTrigger, input.nextTrigger, input.beforeMemory, input.afterMemory);
+    if (!trigger) {
+      return undefined;
+    }
+    const priority = isHardDayReflectionTrigger(trigger) ? "hard" : "soft";
+    const fingerprint = buildDayReflectionFingerprint(trigger, input.afterMemory, input.currentPerception);
+    if (priority === "soft" && this.isSoftReflectionCoolingDown(fingerprint)) {
+      return undefined;
+    }
+    if (priority === "soft") {
+      this.softReflectionCooldowns.set(fingerprint, Date.now());
+    }
+    return {
+      trigger,
+      priority,
+      fingerprint,
+      previousPerception: input.previousPerception,
+      currentPerception: input.currentPerception,
+      report: input.report,
+      recentActionSnapshot: input.recentActionSnapshot,
+      memory: input.afterMemory,
+      overnight: input.overnight
+    };
+  }
+
+  private queueDayReflection(candidate: DayReflectionCandidate | undefined): void {
+    if (!candidate) {
+      return;
+    }
+    if (this.dayReflectionInFlight) {
+      if (candidate.priority === "hard") {
+        this.queuedHardDayReflection = candidate;
+      } else {
+        this.queuedSoftDayReflection = candidate;
+      }
+      return;
+    }
+    this.startDayReflection(candidate);
+  }
+
+  private startDayReflection(candidate: DayReflectionCandidate): void {
+    this.dayReflectionInFlight = this.runDayReflectionCandidate(candidate)
+      .catch((error) => {
+        residentLog("day_reflection_failed", {
+          trigger: candidate.trigger,
+          fingerprint: candidate.fingerprint,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      })
+      .finally(() => {
+        this.dayReflectionInFlight = undefined;
+        const next = this.queuedHardDayReflection ?? this.queuedSoftDayReflection;
+        this.queuedHardDayReflection = undefined;
+        this.queuedSoftDayReflection = undefined;
+        if (next && !this.stopped) {
+          this.startDayReflection(next);
+        }
+      });
+  }
+
+  private async runDayReflectionCandidate(candidate: DayReflectionCandidate): Promise<void> {
+    residentLog("day_reflection_start", {
+      trigger: candidate.trigger,
+      priority: candidate.priority,
+      fingerprint: candidate.fingerprint
+    });
+    const record = await this.sleepCore.reflectDayEvent({
+      trigger: candidate.trigger,
+      previousPerception: candidate.previousPerception,
+      currentPerception: candidate.currentPerception,
+      report: candidate.report,
+      memory: candidate.memory,
+      overnight: candidate.overnight,
+      recentObservations: candidate.memory.recent_observations.slice(-6),
+      recentActionSnapshot: candidate.recentActionSnapshot
+    });
+    const latestMemory = await this.memory.current();
+    await this.memory.replace(rememberDayLifeReflection(latestMemory, record, candidate.currentPerception));
+    residentLog("day_reflection_applied", {
+      trigger: record.trigger,
+      fingerprint: record.fingerprint,
+      summary: record.summary,
+      eventKind: record.result.event_kind
+    });
+  }
+
+  private isSoftReflectionCoolingDown(fingerprint: string): boolean {
+    const now = Date.now();
+    for (const [key, timestamp] of [...this.softReflectionCooldowns.entries()]) {
+      if (now - timestamp > 45_000) {
+        this.softReflectionCooldowns.delete(key);
+      }
+    }
+    const previous = this.softReflectionCooldowns.get(fingerprint);
+    return previous !== undefined && now - previous < 45_000;
   }
 
   private async flushPendingSleepWork(
@@ -488,6 +634,53 @@ function classifyTrigger(
   return "idle_check";
 }
 
+function selectDayReflectionTrigger(
+  turnTrigger: ReplanTrigger,
+  nextTrigger: ReplanTrigger,
+  beforeMemory: MemoryState,
+  afterMemory: MemoryState
+): ReplanTrigger | undefined {
+  const pending = afterMemory.emotion_core.pending_interrupt?.trigger;
+  const candidates = [pending, turnTrigger, nextTrigger].filter((value): value is ReplanTrigger => Boolean(value));
+  for (const candidate of candidates) {
+    if (alwaysReflectTriggers.has(candidate)) {
+      return candidate;
+    }
+    if (conditionalReflectTriggers.has(candidate) && hasMeaningfulLifeDelta(beforeMemory, afterMemory)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function hasMeaningfulLifeDelta(beforeMemory: MemoryState, afterMemory: MemoryState): boolean {
+  const beforeEpisode = beforeMemory.emotion_core.active_episode;
+  const afterEpisode = afterMemory.emotion_core.active_episode;
+  return (
+    beforeEpisode?.id !== afterEpisode?.id ||
+    beforeEpisode?.updated_at !== afterEpisode?.updated_at ||
+    beforeMemory.emotion_core.bonded_entities.length !== afterMemory.emotion_core.bonded_entities.length ||
+    beforeMemory.emotion_core.tagged_places.length !== afterMemory.emotion_core.tagged_places.length ||
+    beforeMemory.emotion_core.pending_interrupt?.trigger !== afterMemory.emotion_core.pending_interrupt?.trigger
+  );
+}
+
+function isHardDayReflectionTrigger(trigger: ReplanTrigger): boolean {
+  return hardReflectTriggers.has(trigger);
+}
+
+function buildDayReflectionFingerprint(trigger: ReplanTrigger, memory: MemoryState, perception: PerceptionFrame): string {
+  const active = memory.emotion_core.active_episode;
+  const place = memory.emotion_core.tagged_places.at(-1);
+  const location = place?.location ?? active?.focal_location ?? perception.position;
+  return [
+    trigger,
+    normalizeFingerprintPart(active?.subject_id_or_label ?? active?.summary ?? "none"),
+    normalizeFingerprintPart(place?.label ?? "none"),
+    `${Math.floor(location.x / 8)}:${Math.floor(location.y / 8)}:${Math.floor(location.z / 8)}`
+  ].join("|");
+}
+
 function crossedDawn(previousTick: number, currentTick: number): boolean {
   const previousTime = previousTick % 24000;
   const currentTime = currentTick % 24000;
@@ -507,6 +700,27 @@ function hasNewPlayer(previous: PerceptionFrame, current: PerceptionFrame): bool
 
 function inventoryHash(inventory: Record<string, number>): string {
   return createHash("sha1").update(JSON.stringify(Object.entries(inventory).sort())).digest("hex");
+}
+
+const alwaysReflectTriggers = new Set<ReplanTrigger>([
+  "death",
+  "respawn",
+  "damage",
+  "hostile_detection",
+  "task_failure",
+  "social_contact",
+  "bonding",
+  "birth",
+  "wonder"
+]);
+
+const conditionalReflectTriggers = new Set<ReplanTrigger>(["player_interaction", "dawn", "task_completion"]);
+
+const hardReflectTriggers = new Set<ReplanTrigger>(["death", "respawn", "damage", "hostile_detection", "task_failure"]);
+
+function normalizeFingerprintPart(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return normalized || "none";
 }
 
 function residentLog(event: string, payload: Record<string, unknown>): void {
@@ -578,6 +792,9 @@ function mergeEmotionCore(primary: MemoryState["emotion_core"], latest: MemorySt
             focal_location: primary.active_episode.focal_location ? { ...primary.active_episode.focal_location } : undefined,
             respawn_location: primary.active_episode.respawn_location ? { ...primary.active_episode.respawn_location } : undefined,
             inventory_loss: [...primary.active_episode.inventory_loss],
+            subject_kind: primary.active_episode.subject_kind,
+            subject_id_or_label: primary.active_episode.subject_id_or_label,
+            novelty: primary.active_episode.novelty,
             appraisal: { ...primary.active_episode.appraisal },
             regulation: { ...primary.active_episode.regulation }
           }
@@ -589,13 +806,18 @@ function mergeEmotionCore(primary: MemoryState["emotion_core"], latest: MemorySt
               focal_location: latest.active_episode.focal_location ? { ...latest.active_episode.focal_location } : undefined,
               respawn_location: latest.active_episode.respawn_location ? { ...latest.active_episode.respawn_location } : undefined,
               inventory_loss: [...latest.active_episode.inventory_loss],
+              subject_kind: latest.active_episode.subject_kind,
+              subject_id_or_label: latest.active_episode.subject_id_or_label,
+              novelty: latest.active_episode.novelty,
               appraisal: { ...latest.active_episode.appraisal },
               regulation: { ...latest.active_episode.regulation }
             }
           : undefined,
     recent_episodes: mergeEmotionEpisodes(primary.recent_episodes, latest.recent_episodes),
     tagged_places: mergeTaggedPlaces(primary.tagged_places, latest.tagged_places),
-    pending_interrupt: primary.pending_interrupt ?? latest.pending_interrupt
+    bonded_entities: mergeBondedEntities(primary.bonded_entities, latest.bonded_entities),
+    pending_interrupt: primary.pending_interrupt ?? latest.pending_interrupt,
+    last_event_at: primary.last_event_at ?? latest.last_event_at
   };
 }
 
@@ -612,6 +834,9 @@ function mergeEmotionEpisodes(
       focal_location: episode.focal_location ? { ...episode.focal_location } : undefined,
       respawn_location: episode.respawn_location ? { ...episode.respawn_location } : undefined,
       inventory_loss: [...episode.inventory_loss],
+      subject_kind: episode.subject_kind,
+      subject_id_or_label: episode.subject_id_or_label,
+      novelty: episode.novelty,
       appraisal: { ...episode.appraisal },
       regulation: { ...episode.regulation }
     });
@@ -632,6 +857,17 @@ function mergeTaggedPlaces(
     });
   }
   return [...merged.values()].slice(-8);
+}
+
+function mergeBondedEntities(
+  primary: MemoryState["emotion_core"]["bonded_entities"],
+  latest: MemoryState["emotion_core"]["bonded_entities"]
+): MemoryState["emotion_core"]["bonded_entities"] {
+  const merged = new Map<string, MemoryState["emotion_core"]["bonded_entities"][number]>();
+  for (const bond of [...latest, ...primary]) {
+    merged.set(bond.id, { ...bond });
+  }
+  return [...merged.values()].slice(-12);
 }
 
 function mergeStrings(primary: string[], latest: string[], limit: number): string[] {

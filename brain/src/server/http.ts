@@ -110,6 +110,41 @@ type BrainBridgeEvent =
       respawn_reason?: string;
     }
   | {
+      type: "animal_bond";
+      timestamp: string;
+      player: {
+        name: string;
+        world?: string;
+        location?: { x: number; y: number; z: number };
+      };
+      animal: {
+        id?: string;
+        species: string;
+        name?: string;
+        location?: { x: number; y: number; z: number };
+      };
+      bond_kind?: "familiar" | "companion" | "caretaking";
+      reason?: string;
+    }
+  | {
+      type: "animal_birth";
+      timestamp: string;
+      player: {
+        name: string;
+        world?: string;
+        location?: { x: number; y: number; z: number };
+      };
+      animal: {
+        species: string;
+        offspring_name?: string;
+        herd_id?: string;
+        location?: { x: number; y: number; z: number };
+      };
+      breeder?: {
+        name?: string;
+      };
+    }
+  | {
       type: "resident_bed_event";
       timestamp: string;
       player: {
@@ -198,7 +233,7 @@ function eventToObservation(event: BrainBridgeEvent): MemoryObservation {
       timestamp: event.timestamp,
       category: "social",
       summary: `Player ${event.player.name} said: ${event.message}`,
-      tags: ["player", "feedback"],
+      tags: ["player", "feedback", event.player.name],
       importance: 0.55,
       source: "dialogue"
     };
@@ -246,6 +281,31 @@ function eventToObservation(event: BrainBridgeEvent): MemoryObservation {
     };
   }
 
+  if (event.type === "animal_bond") {
+    const label = event.animal.name?.trim() || event.animal.species;
+    return {
+      timestamp: event.timestamp,
+      category: "social",
+      summary: `A bond formed with ${label}.`,
+      tags: ["bonding", "pet", event.animal.species, label, event.bond_kind ?? "companion"],
+      importance: 0.82,
+      source: "action",
+      location: event.animal.location ?? event.player.location
+    };
+  }
+
+  if (event.type === "animal_birth") {
+    return {
+      timestamp: event.timestamp,
+      category: "livestock",
+      summary: `New ${event.animal.species} life arrived nearby${event.breeder?.name ? ` with ${event.breeder.name} involved` : ""}.`,
+      tags: ["birth", "nurture", "livestock", event.animal.species, event.animal.offspring_name ?? "newborn"],
+      importance: 0.8,
+      source: "action",
+      location: event.animal.location ?? event.player.location
+    };
+  }
+
   if (event.type === "resident_bed_event") {
     return {
       timestamp: event.timestamp,
@@ -265,7 +325,7 @@ function eventToObservation(event: BrainBridgeEvent): MemoryObservation {
       timestamp: event.timestamp,
       category: event.near_resident ? "social" : "hospitality",
       summary: `${event.player.name} said: ${event.message}`,
-      tags: ["chat", "player", event.near_resident ? "nearby" : "ambient"],
+      tags: ["chat", "player", event.player.name, event.near_resident ? "nearby" : "ambient"],
       importance: event.near_resident ? 0.6 : 0.35,
       source: "dialogue",
       location: event.player.location
@@ -439,7 +499,12 @@ export function createResidentBrainServer(
               : []
           );
         }
-        if (body.type === "resident_death" || body.type === "resident_respawn") {
+        if (
+          body.type === "resident_death" ||
+          body.type === "resident_respawn" ||
+          body.type === "animal_bond" ||
+          body.type === "animal_birth"
+        ) {
           await memory.applyResidentEmotionEvent(eventToResidentEmotionEvent(body));
         }
         await memory.remember(eventToObservation(body));
@@ -457,7 +522,9 @@ export function createResidentBrainServer(
   }).listen(port);
 }
 
-function eventToResidentEmotionEvent(event: Extract<BrainBridgeEvent, { type: "resident_death" | "resident_respawn" }>): ResidentEmotionEvent {
+function eventToResidentEmotionEvent(
+  event: Extract<BrainBridgeEvent, { type: "resident_death" | "resident_respawn" | "animal_bond" | "animal_birth" }>
+): ResidentEmotionEvent {
   if (event.type === "resident_death") {
     const dropped_items = normalizeDroppedItems(event.dropped_items);
     return {
@@ -471,6 +538,32 @@ function eventToResidentEmotionEvent(event: Extract<BrainBridgeEvent, { type: "r
     };
   }
 
+  if (event.type === "animal_bond") {
+    return {
+      type: "animal_bond",
+      timestamp: event.timestamp,
+      cause_tags: compactCauseTags(["bonding", event.reason, event.animal.species]),
+      animal_label: event.animal.name?.trim() || event.animal.species,
+      animal_id: event.animal.id,
+      bond_kind: event.bond_kind,
+      location: event.animal.location ?? event.player.location,
+      world: event.player.world
+    };
+  }
+
+  if (event.type === "animal_birth") {
+    return {
+      type: "animal_birth",
+      timestamp: event.timestamp,
+      cause_tags: compactCauseTags(["birth", event.animal.species, event.breeder?.name ? "witnessed" : undefined]),
+      species: event.animal.species,
+      offspring_label: event.animal.offspring_name,
+      herd_id: event.animal.herd_id,
+      location: event.animal.location ?? event.player.location,
+      world: event.player.world
+    };
+  }
+
   return {
     type: "resident_respawn",
     timestamp: event.timestamp,
@@ -480,6 +573,10 @@ function eventToResidentEmotionEvent(event: Extract<BrainBridgeEvent, { type: "r
     world: event.respawn_world?.name ?? event.player.world,
     bed_spawn: event.bed_spawn
   };
+}
+
+function compactCauseTags(values: Array<string | undefined>): string[] {
+  return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
 function normalizeDroppedItems(items: InventoryDeltaSummary[] | Record<string, number> | undefined): InventoryDeltaSummary[] {

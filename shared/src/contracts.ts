@@ -56,6 +56,10 @@ export type ReplanTrigger =
   | "spawn"
   | "death"
   | "respawn"
+  | "social_contact"
+  | "bonding"
+  | "birth"
+  | "wonder"
   | "wake"
   | "dawn"
   | "dusk"
@@ -185,14 +189,35 @@ export type EmotionEpisodeKind =
   | "loss"
   | "beauty"
   | "social"
+  | "attachment"
+  | "nurture"
+  | "wonder"
+  | "play"
+  | "milestone"
   | "achievement"
   | "safety";
 
 export type EmotionRevisitPolicy = "avoid" | "cautious" | "open";
 
+export type BondedEntityKind = "player" | "pet" | "herd";
+
+export type BondedEntityBondKind = "familiar" | "companion" | "caretaking";
+
 export interface InventoryDeltaSummary {
   item: string;
   count: number;
+}
+
+export interface BondedEntity {
+  id: string;
+  kind: BondedEntityKind;
+  label: string;
+  bond_kind: BondedEntityBondKind;
+  familiarity: number;
+  attachment: number;
+  last_meaningful_contact_at: string;
+  home_affinity?: number;
+  place_affinity_label?: string;
 }
 
 export interface EmotionEpisode {
@@ -207,6 +232,9 @@ export interface EmotionEpisode {
   world?: string;
   focal_location?: Vec3;
   respawn_location?: Vec3;
+  subject_kind?: BondedEntityKind | "place" | "moment";
+  subject_id_or_label?: string;
+  novelty?: number;
   inventory_loss: InventoryDeltaSummary[];
   appraisal: EmotionAppraisalAxes;
   regulation: EmotionRegulationState;
@@ -215,7 +243,7 @@ export interface EmotionEpisode {
   resolved: boolean;
 }
 
-export type EmotionTaggedPlaceKind = "death_site" | "comfort_site" | "awe_site";
+export type EmotionTaggedPlaceKind = "death_site" | "comfort_site" | "awe_site" | "nursery_site" | "bond_site";
 
 export interface EmotionTaggedPlace {
   kind: EmotionTaggedPlaceKind;
@@ -229,7 +257,7 @@ export interface EmotionTaggedPlace {
 }
 
 export interface EmotionInterrupt {
-  trigger: Extract<ReplanTrigger, "death" | "respawn">;
+  trigger: Extract<ReplanTrigger, "death" | "respawn" | "social_contact" | "bonding" | "birth" | "wonder">;
   reason: string;
   created_at: string;
   episode_id?: string;
@@ -243,6 +271,7 @@ export interface EmotionCoreState {
   active_episode?: EmotionEpisode;
   recent_episodes: EmotionEpisode[];
   tagged_places: EmotionTaggedPlace[];
+  bonded_entities: BondedEntity[];
   pending_interrupt?: EmotionInterrupt;
   last_event_at?: string;
 }
@@ -668,6 +697,78 @@ export interface OvernightConsolidation {
   project_memories: string[];
   value_shift_summary: string[];
   creative_motifs: string[];
+}
+
+export interface DayLifeReflectionSubject {
+  kind: BondedEntityKind | "place" | "moment";
+  label: string;
+}
+
+export interface DayLifeReflectionBondDelta {
+  kind: BondedEntityKind;
+  label: string;
+  bond_kind: BondedEntityBondKind;
+  delta_familiarity: number;
+  delta_attachment: number;
+  home_affinity?: number;
+}
+
+export interface DayLifeReflectionTaggedPlace {
+  kind: EmotionTaggedPlaceKind;
+  label: string;
+  location: Vec3;
+  world?: string;
+  salience?: number;
+  revisit_policy?: EmotionRevisitPolicy;
+}
+
+export interface DayLifeReflectionObservation {
+  category: MemoryObservation["category"];
+  summary: string;
+  tags: string[];
+  importance: number;
+}
+
+export interface DayLifeReflectionInterrupt {
+  trigger: EmotionInterrupt["trigger"];
+  reason: string;
+}
+
+export interface DayLifeReflectionResult {
+  summary: string;
+  event_kind: EmotionEpisodeKind;
+  salience: number;
+  dominant_emotions: string[];
+  appraisal: Partial<EmotionAppraisal>;
+  regulation: Partial<EmotionRegulation>;
+  action_biases?: Partial<EmotionActionBiases>;
+  subject?: DayLifeReflectionSubject;
+  place?: DayLifeReflectionTaggedPlace;
+  bond?: DayLifeReflectionBondDelta;
+  interrupt?: DayLifeReflectionInterrupt;
+  observation?: DayLifeReflectionObservation;
+}
+
+export interface DayLifeReflectionRecord {
+  id: string;
+  day_number: number;
+  created_at: string;
+  trigger: ReplanTrigger;
+  fingerprint: string;
+  summary: string;
+  result: DayLifeReflectionResult;
+}
+
+export interface DayLifeReflectionInput {
+  trigger: ReplanTrigger;
+  previousPerception: PerceptionFrame;
+  currentPerception: PerceptionFrame;
+  report?: ActionReport;
+  memory: MemoryState;
+  overnight?: OvernightConsolidation;
+  recentObservations: MemoryObservation[];
+  recentActionSnapshot?: RecentActionSnapshot;
+  latestDayReflections: DayLifeReflectionRecord[];
 }
 
 export interface ActionReport {

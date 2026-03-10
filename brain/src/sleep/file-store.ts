@@ -3,6 +3,7 @@ import { dirname } from "node:path";
 import {
   ConsolidationRecord,
   CultureSignal,
+  DayLifeReflectionRecord,
   MemoryBundle,
   ValueProfile
 } from "@resident/shared";
@@ -13,6 +14,7 @@ export interface SleepStoreData {
   bundles: MemoryBundle[];
   cultureSignals: CultureSignal[];
   consolidations: ConsolidationRecord[];
+  dayReflections: DayLifeReflectionRecord[];
   valueProfile: ValueProfile;
   salience: Record<string, number>;
 }
@@ -29,6 +31,7 @@ export class FileBackedSleepStore implements LongTermMemoryArchive {
         bundles: [],
         cultureSignals: [],
         consolidations: [],
+        dayReflections: [],
         valueProfile: DEFAULT_VALUE_PROFILE,
         salience: {}
       };

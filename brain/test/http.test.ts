@@ -8,7 +8,7 @@ import { FileBackedMemoryStore } from "../src/memory/file-store";
 import { MemoryManager } from "../src/memory/memory-manager";
 import { createResidentBrainServer } from "../src/server/http";
 import { FileBackedSleepStore } from "../src/sleep/file-store";
-import { SleepConsolidator, SleepCore } from "../src/sleep/sleep-core";
+import { ReflectiveConsolidator, SleepCore } from "../src/sleep/sleep-core";
 
 const defaultOutcome: DailyOutcome = {
   dayNumber: 0,
@@ -175,6 +175,55 @@ describe("createResidentBrainServer", () => {
     ]);
   });
 
+  it("accepts animal bond and birth events into life-core memory", async () => {
+    const { postEvent, memory } = await createHarness(cleanups);
+
+    await postEvent({
+      type: "animal_bond",
+      timestamp: "2026-03-10T08:00:00.000Z",
+      player: {
+        name: "resident-1",
+        world: "world",
+        location: { x: 0, y: 64, z: 0 }
+      },
+      animal: {
+        id: "wolf-1",
+        species: "wolf",
+        name: "Birch",
+        location: { x: 1, y: 64, z: 1 }
+      },
+      bond_kind: "companion",
+      reason: "tamed"
+    });
+
+    await postEvent({
+      type: "animal_birth",
+      timestamp: "2026-03-10T08:05:00.000Z",
+      player: {
+        name: "resident-1",
+        world: "world",
+        location: { x: 0, y: 64, z: 0 }
+      },
+      animal: {
+        species: "sheep",
+        herd_id: "sheep",
+        offspring_name: "lamb",
+        location: { x: 2, y: 64, z: 2 }
+      },
+      breeder: {
+        name: "resident-1"
+      }
+    });
+
+    const state = await memory.current();
+    expect(state.emotion_core.bonded_entities.some((bond) => bond.kind === "pet" && bond.label === "Birch")).toBe(true);
+    expect(state.emotion_core.bonded_entities.some((bond) => bond.kind === "herd" && bond.label.includes("sheep"))).toBe(true);
+    expect(state.recent_observations.some((entry) => entry.tags.includes("bonding"))).toBe(true);
+    expect(state.recent_observations.some((entry) => entry.tags.includes("birth"))).toBe(true);
+    expect(state.emotion_core.tagged_places.some((place) => place.kind === "bond_site")).toBe(true);
+    expect(state.emotion_core.tagged_places.some((place) => place.kind === "nursery_site")).toBe(true);
+  });
+
   it("feeds meaningful chat into sleep-core culture signals", async () => {
     const { postEvent, memory, sleepCore } = await createHarness(cleanups);
 
@@ -205,7 +254,21 @@ describe("createResidentBrainServer", () => {
         modelName: "sleep-test",
         synthesize: vi.fn(async () => {
           throw new Error("model offline");
-        })
+        }),
+        reflectDay: vi.fn(async () => ({
+          summary: "The moment still mattered even though the model failed at night.",
+          event_kind: "wonder",
+          salience: 0.5,
+          dominant_emotions: ["awed"],
+          appraisal: {
+            wonder: 0.6,
+            curiosity: 0.42
+          },
+          regulation: {
+            arousal: 0.3,
+            recovery: 0.38
+          }
+        }))
       }
     });
 
@@ -308,7 +371,7 @@ describe("createResidentBrainServer", () => {
 
 async function createHarness(
   cleanups: Array<() => Promise<void>>,
-  options: { consolidator?: SleepConsolidator; presentation?: ResidentPresentationSource } = {}
+  options: { consolidator?: ReflectiveConsolidator; presentation?: ResidentPresentationSource } = {}
 ) {
   const dir = await mkdtemp(join(tmpdir(), "resident-brain-http-"));
   const sleepStore = new FileBackedSleepStore(join(dir, "sleep.json"));
@@ -403,7 +466,7 @@ const basePerception: PerceptionFrame = {
   settlement_zones: []
 };
 
-function createHarnessConsolidator(): SleepConsolidator {
+function createHarnessConsolidator(): ReflectiveConsolidator {
   return {
     modelName: "sleep-test",
     synthesize: vi.fn(async () => ({
@@ -413,6 +476,27 @@ function createHarnessConsolidator(): SleepConsolidator {
       place_memories: ["home"],
       project_memories: ["Doorway Repair: Keep the entrance dry and bright."],
       creative_motifs: ["The doorway looked warm in the rain."]
+    })),
+    reflectDay: vi.fn(async () => ({
+      summary: "The resident marked the moment as meaningful.",
+      event_kind: "wonder",
+      salience: 0.62,
+      dominant_emotions: ["awed"],
+      appraisal: {
+        wonder: 0.72,
+        curiosity: 0.58,
+        comfort: 0.4
+      },
+      regulation: {
+        arousal: 0.34,
+        recovery: 0.46
+      },
+      observation: {
+        category: "beauty",
+        summary: "The resident paused to really take the scene in.",
+        tags: ["wonder", "beauty"],
+        importance: 0.62
+      }
     }))
   };
 }

@@ -2,6 +2,7 @@ import {
   ActionReport,
   AffectState,
   BootstrapProgress,
+  DayLifeReflectionRecord,
   MemoryBundle,
   MemoryObservation,
   MemoryState,
@@ -22,6 +23,7 @@ import {
   DEFAULT_NEED_STATE
 } from "@resident/shared";
 import {
+  applyDayLifeReflection,
   applyEmotionActionReport,
   applyEmotionObservation,
   applyResidentEmotionEvent,
@@ -259,6 +261,64 @@ export function rememberActionSnapshot(memory: MemoryState, snapshot: RecentActi
   };
 }
 
+export function rememberDayLifeReflection(
+  memory: MemoryState,
+  reflection: DayLifeReflectionRecord,
+  perception: PerceptionFrame
+): MemoryState {
+  const observation = reflection.result.observation
+    ? {
+        timestamp: reflection.created_at,
+        category: reflection.result.observation.category,
+        summary: reflection.result.observation.summary,
+        tags: [...reflection.result.observation.tags],
+        importance: reflection.result.observation.importance,
+        source: "reflection" as const,
+        location: reflection.result.place?.location ? { ...reflection.result.place.location } : { ...perception.position }
+      }
+    : undefined;
+  const interactionNote =
+    observation &&
+    (observation.category === "social" || observation.category === "hospitality" || observation.tags.includes("bonding"))
+      ? observation.summary
+      : reflection.result.event_kind === "social" || reflection.result.event_kind === "attachment"
+        ? reflection.summary
+        : undefined;
+  const dangerNote =
+    observation && (observation.category === "danger" || observation.tags.includes("death") || observation.tags.includes("combat"))
+      ? observation.summary
+      : ["death", "damage", "combat", "loss"].includes(reflection.result.event_kind)
+        ? reflection.summary
+        : undefined;
+
+  return {
+    ...memory,
+    recent_observations: observation ? trim([...memory.recent_observations, observation], 18) : memory.recent_observations,
+    recent_interactions: interactionNote ? trim([...memory.recent_interactions, interactionNote], 10) : memory.recent_interactions,
+    recent_dangers: dangerNote ? trim([...memory.recent_dangers, dangerNote], 10) : memory.recent_dangers,
+    place_tags: trimUnique([
+      ...memory.place_tags,
+      ...(observation?.tags ?? []),
+      ...(reflection.result.place?.label ? [reflection.result.place.label] : [])
+    ]),
+    emotion_core: applyDayLifeReflection(memory.emotion_core, reflection.result, {
+      trigger: reflection.trigger,
+      timestamp: reflection.created_at,
+      perception,
+      personality: memory.personality_profile
+    }),
+    self_narrative: trim(
+      [
+        ...memory.self_narrative,
+        reflection.summary,
+        ...(observation && observation.summary !== reflection.summary ? [observation.summary] : [])
+      ],
+      10
+    ),
+    last_updated_at: nowIso()
+  };
+}
+
 export function updateProtectedAreas(memory: MemoryState, protectedAreas: ProtectedArea[]): MemoryState {
   return {
     ...memory,
@@ -319,6 +379,9 @@ export function buildMemoryBundle(memory: MemoryState, agentId: string): MemoryB
             focal_location: memory.emotion_core.active_episode.focal_location ? { ...memory.emotion_core.active_episode.focal_location } : undefined,
             respawn_location: memory.emotion_core.active_episode.respawn_location ? { ...memory.emotion_core.active_episode.respawn_location } : undefined,
             inventory_loss: [...memory.emotion_core.active_episode.inventory_loss],
+            subject_kind: memory.emotion_core.active_episode.subject_kind,
+            subject_id_or_label: memory.emotion_core.active_episode.subject_id_or_label,
+            novelty: memory.emotion_core.active_episode.novelty,
             appraisal: { ...memory.emotion_core.active_episode.appraisal },
             regulation: { ...memory.emotion_core.active_episode.regulation }
           }
@@ -330,6 +393,9 @@ export function buildMemoryBundle(memory: MemoryState, agentId: string): MemoryB
         focal_location: episode.focal_location ? { ...episode.focal_location } : undefined,
         respawn_location: episode.respawn_location ? { ...episode.respawn_location } : undefined,
         inventory_loss: [...episode.inventory_loss],
+        subject_kind: episode.subject_kind,
+        subject_id_or_label: episode.subject_id_or_label,
+        novelty: episode.novelty,
         appraisal: { ...episode.appraisal },
         regulation: { ...episode.regulation }
       })),
@@ -338,6 +404,7 @@ export function buildMemoryBundle(memory: MemoryState, agentId: string): MemoryB
         location: { ...place.location },
         cause_tags: [...place.cause_tags]
       })),
+      bonded_entities: memory.emotion_core.bonded_entities.map((bond) => ({ ...bond })),
       pending_interrupt: memory.emotion_core.pending_interrupt ? { ...memory.emotion_core.pending_interrupt } : undefined
     }
   };

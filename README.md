@@ -86,10 +86,10 @@ Useful environment variables:
 - `RESIDENT_LOOP_MS`
 - `OPENAI_API_KEY`
 - `RESIDENT_OPENAI_MODEL`
-- `RESIDENT_SLEEP_OPENAI_MODEL`
+- `RESIDENT_REFLECTIVE_OPENAI_MODEL`
 
 If `OPENAI_API_KEY` is absent, the resident falls back to the deterministic wake-brain executive.
-`RESIDENT_SLEEP_OPENAI_MODEL` is required for sleep-core startup. Overnight sleep consolidation always uses that separate model while recall stays deterministic and memory-owned. The sleep model reuses `OPENAI_API_KEY` and `RESIDENT_OPENAI_BASE_URL`.
+`RESIDENT_REFLECTIVE_OPENAI_MODEL` is required for reflective-core startup. The same reflective model handles daytime life reflection and overnight sleep consolidation, while recall stays deterministic and memory-owned. It reuses `OPENAI_API_KEY` and `RESIDENT_OPENAI_BASE_URL`.
 
 Set `MINECRAFT_VIEWER_PORT` to override the default viewer port.
 
@@ -129,7 +129,7 @@ Set the resident account name in [`config.yml`](plugin/src/main/resources/config
 ## Notes
 
 - Awake `memory` owns live world facts, short-horizon continuity, daytime recall, and the end-of-day `MemoryBundle`.
-- `sleep-core` only runs sleep-time consolidation and long-term autobiographical integration, and it requires its own configured model; wake orientation is produced by the awake brain after reading the morning world state.
+- `sleep-core` still owns overnight consolidation and long-term autobiographical integration, but its configured reflective model now also runs event-driven daytime life reflection; wake orientation is still produced by the awake brain after reading the morning world state.
 - The resident is designed around bounded flourishing rather than reward maximization, and happiness is allowed to survive failure.
 - The runner emits structured JSON logs for planning turns, recall, action execution, memory handoff, consolidation, and value updates.
 - ALMA is intentionally out of scope here.

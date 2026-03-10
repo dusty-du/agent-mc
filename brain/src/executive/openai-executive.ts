@@ -110,6 +110,9 @@ export class OpenAIExecutivePlanner implements ExecutivePlanner {
                             cause_tags: input.memory.emotion_core.active_episode.cause_tags,
                             focal_location: input.memory.emotion_core.active_episode.focal_location,
                             respawn_location: input.memory.emotion_core.active_episode.respawn_location,
+                            subject_kind: input.memory.emotion_core.active_episode.subject_kind,
+                            subject_id_or_label: input.memory.emotion_core.active_episode.subject_id_or_label,
+                            novelty: input.memory.emotion_core.active_episode.novelty,
                             inventory_loss: input.memory.emotion_core.active_episode.inventory_loss,
                             intensity: input.memory.emotion_core.active_episode.intensity,
                             revisit_policy: input.memory.emotion_core.active_episode.revisit_policy,
@@ -117,6 +120,7 @@ export class OpenAIExecutivePlanner implements ExecutivePlanner {
                           }
                         : undefined,
                       tagged_places: input.memory.emotion_core.tagged_places,
+                      bonded_entities: input.memory.emotion_core.bonded_entities,
                       pending_interrupt: input.memory.emotion_core.pending_interrupt
                     },
                     current_goals: input.memory.current_goals,

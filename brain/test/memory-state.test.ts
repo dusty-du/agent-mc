@@ -158,6 +158,71 @@ describe("memory-state", () => {
     expect(memory.emotion_core.tagged_places.some((place) => place.kind === "awe_site")).toBe(true);
     expect(memory.emotion_core.dominant_emotions).toContain("awed");
   });
+
+  it("creates attachment bonds from first nearby meetings", () => {
+    const memory = syncMemoryState(createMemoryState(), {
+      ...basePerception,
+      nearby_entities: [
+        {
+          id: "player-1",
+          name: "Alex",
+          type: "player",
+          distance: 4,
+          position: { x: 4, y: 64, z: 0 }
+        }
+      ]
+    });
+
+    expect(memory.emotion_core.active_episode?.kind).toBe("attachment");
+    expect(memory.emotion_core.pending_interrupt?.trigger).toBe("social_contact");
+    expect(memory.emotion_core.bonded_entities.some((bond) => bond.kind === "player" && bond.label === "Alex")).toBe(true);
+  });
+
+  it("creates wonder episodes from safe sunrises", () => {
+    const memory = syncMemoryState(createMemoryState(), {
+      ...basePerception,
+      tick_time: 350,
+      notable_places: ["ridge overlook"],
+      terrain_affordances: [
+        {
+          type: "view",
+          location: { x: 8, y: 67, z: 1 },
+          note: "A high place with a long view."
+        }
+      ]
+    });
+
+    expect(["wonder", "milestone"]).toContain(memory.emotion_core.active_episode?.kind);
+    expect(memory.emotion_core.pending_interrupt?.trigger).toBe("wonder");
+    expect(memory.emotion_core.tagged_places.some((place) => place.kind === "awe_site")).toBe(true);
+  });
+
+  it("creates nurture episodes and herd bonds around nearby newborn animals", () => {
+    const memory = syncMemoryState(createMemoryState(), {
+      ...basePerception,
+      nearby_entities: [
+        {
+          id: "sheep-baby",
+          name: "sheep",
+          type: "passive",
+          distance: 5,
+          isBaby: true,
+          position: { x: 5, y: 64, z: 2 }
+        }
+      ],
+      livestock_state: {
+        ...basePerception.livestock_state,
+        counts: {
+          sheep: 3
+        }
+      }
+    });
+
+    expect(memory.emotion_core.active_episode?.kind).toBe("nurture");
+    expect(memory.emotion_core.pending_interrupt?.trigger).toBe("birth");
+    expect(memory.emotion_core.tagged_places.some((place) => place.kind === "nursery_site")).toBe(true);
+    expect(memory.emotion_core.bonded_entities.some((bond) => bond.kind === "herd" && bond.label.includes("sheep"))).toBe(true);
+  });
 });
 
 const basePerception: PerceptionFrame = {

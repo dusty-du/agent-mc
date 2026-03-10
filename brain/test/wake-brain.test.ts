@@ -535,6 +535,7 @@ describe("WakeBrain combat decisions", () => {
             updated_at: "2026-03-10T06:00:05.000Z"
           }
         ],
+        bonded_entities: [],
         pending_interrupt: {
           trigger: "respawn",
           reason: "Respawning should interrupt routine.",
@@ -570,6 +571,76 @@ describe("WakeBrain combat decisions", () => {
     expect(decision.intent.intent_type).not.toBe("gather");
     expect(decision.intent.dialogue?.toLowerCase()).toContain("explosion");
     expect(decision.observations.some((entry) => entry.tags.includes("emotion"))).toBe(true);
+  });
+
+  it("lets wonder interrupts produce a deliberate observe turn instead of routine work", () => {
+    const memory = createMemoryWith({
+      emotion_core: {
+        ...createMemoryState().emotion_core,
+        active_episode: {
+          id: "wonder:1",
+          kind: "wonder",
+          summary: "Sunrise made the river bend feel newly alive.",
+          started_at: "2026-03-10T06:00:00.000Z",
+          updated_at: "2026-03-10T06:00:10.000Z",
+          source_trigger: "wonder",
+          dominant_emotions: ["awed"],
+          cause_tags: ["sunrise", "wonder"],
+          focal_location: { x: 3, y: 64, z: 3 },
+          subject_kind: "moment",
+          subject_id_or_label: "sunrise",
+          novelty: 0.82,
+          inventory_loss: [],
+          appraisal: {
+            threat: 0.02,
+            loss: 0.01,
+            pain: 0.01,
+            curiosity: 0.62,
+            connection: 0.18,
+            comfort: 0.32,
+            mastery: 0.14,
+            wonder: 0.86
+          },
+          regulation: {
+            arousal: 0.34,
+            shock: 0.01,
+            vigilance: 0.04,
+            resolve: 0.3,
+            recovery: 0.64
+          },
+          intensity: 0.7,
+          revisit_policy: "open",
+          resolved: false
+        },
+        pending_interrupt: {
+          trigger: "wonder",
+          reason: "A strong wonder moment deserves a pause.",
+          created_at: "2026-03-10T06:00:10.000Z"
+        }
+      }
+    });
+
+    const decision = new WakeBrain().decide(
+      {
+        ...basePerception,
+        tick_time: 320,
+        notable_places: ["river bend"],
+        terrain_affordances: [
+          {
+            type: "view",
+            location: { x: 6, y: 66, z: 1 },
+            note: "A high overlook."
+          }
+        ]
+      },
+      memory,
+      DEFAULT_VALUE_PROFILE,
+      undefined,
+      "wonder"
+    );
+
+    expect(decision.intent.intent_type).toBe("observe");
+    expect(decision.intent.dialogue).toContain("worth");
   });
 
   it("prioritizes crafting torches before dusk when light is unsecured", () => {

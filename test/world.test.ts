@@ -188,7 +188,7 @@ describe("world bootstrap", () => {
         RESIDENT_MEMORY_STORE: join(cwd, ".runtime", "brain-data", "memory.json"),
         RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
         RESIDENT_SLEEP_STORE: join(cwd, ".runtime", "brain-data", "sleep-core.json"),
-        RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model"
+        RESIDENT_REFLECTIVE_OPENAI_MODEL: "example-reflective-model"
       })
     );
     expect(spawnCalls[5].env).toEqual(
@@ -198,7 +198,7 @@ describe("world bootstrap", () => {
         RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
         RESIDENT_OPENAI_MODEL: "example-chat-model",
         RESIDENT_SLEEP_STORE: join(cwd, ".runtime", "brain-data", "sleep-core.json"),
-        RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model"
+        RESIDENT_REFLECTIVE_OPENAI_MODEL: "example-reflective-model"
       })
     );
 
@@ -534,7 +534,7 @@ describe("world bootstrap", () => {
         OPENAI_API_KEY: "wrong-key",
         RESIDENT_OPENAI_BASE_URL: "https://example.invalid/v1",
         RESIDENT_OPENAI_MODEL: "wrong-main",
-        RESIDENT_SLEEP_OPENAI_MODEL: "wrong-sleep"
+        RESIDENT_REFLECTIVE_OPENAI_MODEL: "wrong-sleep"
       },
       fetchImpl,
       spawnImpl,
@@ -551,7 +551,7 @@ describe("world bootstrap", () => {
         OPENAI_API_KEY: "example-openai-api-key",
         RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
         RESIDENT_OPENAI_MODEL: "example-chat-model",
-        RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model"
+        RESIDENT_REFLECTIVE_OPENAI_MODEL: "example-reflective-model"
       })
     );
     expect(botCall?.env).toEqual(
@@ -559,7 +559,7 @@ describe("world bootstrap", () => {
         OPENAI_API_KEY: "example-openai-api-key",
         RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
         RESIDENT_OPENAI_MODEL: "example-chat-model",
-        RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model"
+        RESIDENT_REFLECTIVE_OPENAI_MODEL: "example-reflective-model"
       })
     );
 

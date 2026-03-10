@@ -271,7 +271,7 @@ export async function bootstrapWorld(options = {}) {
     RESIDENT_MEMORY_STORE: paths.memoryStorePath,
     RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
     RESIDENT_OPENAI_MODEL: "example-chat-model",
-    RESIDENT_SLEEP_OPENAI_MODEL: "example-reflective-model",
+    RESIDENT_REFLECTIVE_OPENAI_MODEL: "example-reflective-model",
     RESIDENT_SLEEP_STORE: paths.sleepStorePath
   };
   const brainProcess = spawnLoggedProcess({

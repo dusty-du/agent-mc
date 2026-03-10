@@ -22,9 +22,26 @@ describe("MemoryManager.recall", () => {
             summary: "A garden-focused day.",
             insights: ["Remember the garden path when making home."],
             risk_themes: [],
+            emotional_themes: ["settled"],
             place_memories: ["rose garden"],
             project_memories: ["Garden Bridge: Strengthen the rose garden crossing."],
             creative_motifs: ["The rose garden arch felt welcoming at dusk."]
+          };
+        },
+        async reflectDay() {
+          return {
+            summary: "The garden arch still felt meaningful.",
+            event_kind: "wonder",
+            salience: 0.62,
+            dominant_emotions: ["awed"],
+            appraisal: {
+              wonder: 0.72,
+              curiosity: 0.54
+            },
+            regulation: {
+              arousal: 0.32,
+              recovery: 0.44
+            }
           };
         }
       });

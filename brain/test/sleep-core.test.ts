@@ -2,16 +2,19 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_LIVESTOCK_STATE, PerceptionFrame } from "@resident/shared";
+import { createMemoryState } from "../src/memory/memory-state";
 import { FileBackedSleepStore } from "../src/sleep/file-store";
-import { createOpenAISleepConsolidatorFromEnv } from "../src/sleep/openai-sleep-consolidator";
-import { SleepConsolidationError, SleepConsolidator, SleepCore } from "../src/sleep/sleep-core";
+import { createOpenAIReflectiveConsolidatorFromEnv } from "../src/sleep/openai-sleep-consolidator";
+import { ReflectiveConsolidator, SleepConsolidationError, SleepCore } from "../src/sleep/sleep-core";
 
-const originalSleepModel = process.env.RESIDENT_SLEEP_OPENAI_MODEL;
+const originalReflectiveModel = process.env.RESIDENT_REFLECTIVE_OPENAI_MODEL;
 const originalApiKey = process.env.OPENAI_API_KEY;
 const originalBaseUrl = process.env.RESIDENT_OPENAI_BASE_URL;
 
 afterEach(() => {
-  restoreEnv("RESIDENT_SLEEP_OPENAI_MODEL", originalSleepModel);
+  restoreEnv("RESIDENT_REFLECTIVE_OPENAI_MODEL", originalReflectiveModel);
+  delete process.env.RESIDENT_SLEEP_OPENAI_MODEL;
   restoreEnv("OPENAI_API_KEY", originalApiKey);
   restoreEnv("RESIDENT_OPENAI_BASE_URL", originalBaseUrl);
   vi.restoreAllMocks();
@@ -38,10 +41,10 @@ describe("SleepCore", () => {
     }
   });
 
-  it("uses RESIDENT_SLEEP_OPENAI_MODEL for model-backed consolidation", async () => {
+  it("uses RESIDENT_REFLECTIVE_OPENAI_MODEL for model-backed consolidation", async () => {
     const dir = await mkdtemp(join(tmpdir(), "resident-sleep-model-"));
     try {
-      process.env.RESIDENT_SLEEP_OPENAI_MODEL = "gpt-sleep-test";
+      process.env.RESIDENT_REFLECTIVE_OPENAI_MODEL = "gpt-sleep-test";
       process.env.OPENAI_API_KEY = "test-key";
       process.env.RESIDENT_OPENAI_BASE_URL = "https://sleep.example/v1";
 
@@ -61,7 +64,7 @@ describe("SleepCore", () => {
       }));
       vi.stubGlobal("fetch", fetchMock);
 
-      const consolidator = createOpenAISleepConsolidatorFromEnv();
+      const consolidator = createOpenAIReflectiveConsolidatorFromEnv();
       expect(consolidator).toBeDefined();
 
       const store = new FileBackedSleepStore(join(dir, "sleep.json"));
@@ -93,6 +96,20 @@ describe("SleepCore", () => {
             place_memories: [],
             project_memories: [],
             creative_motifs: []
+        })),
+        reflectDay: vi.fn(async () => ({
+          summary: "A passing moment.",
+          event_kind: "wonder",
+          salience: 0.4,
+          dominant_emotions: ["curious"],
+          appraisal: {
+            wonder: 0.5,
+            curiosity: 0.42
+          },
+          regulation: {
+            arousal: 0.28,
+            recovery: 0.36
+          }
         }))
       });
 
@@ -102,18 +119,92 @@ describe("SleepCore", () => {
     }
   });
 
-  it("fails fast when RESIDENT_SLEEP_OPENAI_MODEL is missing", () => {
+  it("fails fast when RESIDENT_REFLECTIVE_OPENAI_MODEL is missing", () => {
+    delete process.env.RESIDENT_REFLECTIVE_OPENAI_MODEL;
     delete process.env.RESIDENT_SLEEP_OPENAI_MODEL;
     process.env.OPENAI_API_KEY = "test-key";
 
-    expect(() => createOpenAISleepConsolidatorFromEnv()).toThrow("RESIDENT_SLEEP_OPENAI_MODEL");
+    expect(() => createOpenAIReflectiveConsolidatorFromEnv()).toThrow("RESIDENT_REFLECTIVE_OPENAI_MODEL");
   });
 
-  it("fails fast when a sleep model is configured without OPENAI_API_KEY", () => {
-    process.env.RESIDENT_SLEEP_OPENAI_MODEL = "gpt-sleep-test";
+  it("fails fast when a reflective model is configured without OPENAI_API_KEY", () => {
+    process.env.RESIDENT_REFLECTIVE_OPENAI_MODEL = "gpt-sleep-test";
     delete process.env.OPENAI_API_KEY;
 
-    expect(() => createOpenAISleepConsolidatorFromEnv()).toThrow("OPENAI_API_KEY");
+    expect(() => createOpenAIReflectiveConsolidatorFromEnv()).toThrow("OPENAI_API_KEY");
+  });
+
+  it("hard-fails when only the old sleep-model env var is set", () => {
+    process.env.RESIDENT_SLEEP_OPENAI_MODEL = "gpt-old-name";
+    process.env.OPENAI_API_KEY = "test-key";
+
+    expect(() => createOpenAIReflectiveConsolidatorFromEnv()).toThrow("RESIDENT_REFLECTIVE_OPENAI_MODEL");
+  });
+
+  it("stores a daytime life reflection record", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "resident-day-reflection-"));
+    try {
+      const store = new FileBackedSleepStore(join(dir, "sleep.json"));
+      const sleepCore = new SleepCore(store, sampleConsolidator());
+      const record = await sleepCore.reflectDayEvent({
+        trigger: "wonder",
+        previousPerception: samplePerception(900),
+        currentPerception: samplePerception(1200),
+        memory: sampleMemory(),
+        recentObservations: sampleBundle().observations,
+        recentActionSnapshot: sampleBundle().recent_action_snapshots[0]
+      });
+
+      expect(record.trigger).toBe("wonder");
+      expect(record.result.event_kind).toBe("wonder");
+      expect(record.summary).toContain("sunrise");
+      await expect(sleepCore.latestDayReflections()).resolves.toEqual([record]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("feeds stored daytime reflections into overnight consolidation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "resident-night-reflection-"));
+    const synthesize = vi.fn(async () => ({
+      summary: "Night folded the sunrise into tomorrow.",
+      insights: ["Carry the ridge-light forward."],
+      risk_themes: [],
+      emotional_themes: ["hopeful"],
+      place_memories: ["sunrise ridge"],
+      project_memories: [],
+      creative_motifs: ["Morning light along the ridge."]
+    }));
+    try {
+      const store = new FileBackedSleepStore(join(dir, "sleep.json"));
+      const sleepCore = new SleepCore(store, {
+        ...sampleConsolidator(),
+        synthesize
+      });
+      await sleepCore.reflectDayEvent({
+        trigger: "wonder",
+        previousPerception: samplePerception(900),
+        currentPerception: samplePerception(1200),
+        memory: sampleMemory(),
+        recentObservations: sampleBundle().observations,
+        recentActionSnapshot: sampleBundle().recent_action_snapshots[0]
+      });
+
+      await sleepCore.consolidate(sampleBundle(), sampleOutcome());
+
+      expect(synthesize).toHaveBeenCalledWith(
+        expect.objectContaining({
+          recentDayReflections: [
+            expect.objectContaining({
+              trigger: "wonder",
+              summary: expect.stringContaining("sunrise")
+            })
+          ]
+        })
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -216,6 +307,38 @@ function sampleBundle() {
       security: 0.55,
       belonging: 0.7,
       satisfaction: 0.58
+    },
+    emotion_core: {
+      axes: {
+        threat: 0.24,
+        loss: 0.16,
+        pain: 0.08,
+        curiosity: 0.48,
+        connection: 0.42,
+        comfort: 0.52,
+        mastery: 0.46,
+        wonder: 0.58
+      },
+      regulation: {
+        arousal: 0.34,
+        shock: 0.08,
+        vigilance: 0.24,
+        resolve: 0.46,
+        recovery: 0.6
+      },
+      action_biases: {
+        avoid_risk: 0.22,
+        seek_shelter: 0.2,
+        seek_recovery: 0.18,
+        seek_company: 0.24,
+        seek_mastery: 0.32,
+        seek_wonder: 0.38,
+        cautious_revisit: 0.12
+      },
+      dominant_emotions: ["resolved", "awed"],
+      recent_episodes: [],
+      tagged_places: [],
+      bonded_entities: []
     }
   };
 }
@@ -242,7 +365,81 @@ function sampleOutcome() {
   };
 }
 
-function sampleConsolidator(): SleepConsolidator {
+function sampleMemory() {
+  const memory = createMemoryState();
+  memory.current_day = 3;
+  memory.self_name = "Hazel";
+  memory.home_anchor = { x: 0, y: 64, z: 0 };
+  memory.place_tags = ["home", "quiet corner"];
+  memory.emotion_core = sampleBundle().emotion_core;
+  memory.recent_observations = sampleBundle().observations;
+  memory.recent_action_snapshots = sampleBundle().recent_action_snapshots;
+  return memory;
+}
+
+function samplePerception(tickTime: number): PerceptionFrame {
+  return {
+    agent_id: "resident-1",
+    tick_time: tickTime,
+    position: { x: 2, y: 64, z: 2 },
+    weather: "clear",
+    light_level: 15,
+    health: 20,
+    hunger: 18,
+    inventory: { oak_log: 8 },
+    nearby_entities: [],
+    nearby_blocks: [],
+    home_state: {
+      anchor: { x: 0, y: 64, z: 0 },
+      shelterScore: 0.82,
+      bedAvailable: true,
+      workshopReady: true,
+      guestCapacity: 0
+    },
+    snapshot_refs: [],
+    notable_places: ["home", "sunrise ridge"],
+    pantry_state: {
+      carriedCalories: 180,
+      pantryCalories: 220,
+      cookedMeals: 1,
+      cropReadiness: 0,
+      emergencyReserveDays: 2
+    },
+    farm_state: {
+      farmlandReady: false,
+      plantedCrops: [],
+      hydratedTiles: 0,
+      harvestableTiles: 0,
+      seedStock: {}
+    },
+    livestock_state: DEFAULT_LIVESTOCK_STATE,
+    combat_state: {
+      hostilesNearby: 0,
+      armorScore: 0,
+      weaponTier: "none",
+      escapeRouteKnown: true
+    },
+    safe_route_state: {
+      homeRouteKnown: true,
+      nearestShelter: { x: 0, y: 64, z: 0 },
+      nightSafeRadius: 24
+    },
+    workstation_state: {
+      craftingTableNearby: true,
+      furnaceNearby: false,
+      smokerNearby: false,
+      blastFurnaceNearby: false,
+      chestNearby: false
+    },
+    storage_sites: [],
+    crop_sites: [],
+    terrain_affordances: [],
+    protected_areas: [],
+    settlement_zones: []
+  };
+}
+
+function sampleConsolidator(): ReflectiveConsolidator {
   return {
     modelName: "sleep-test",
     synthesize: vi.fn(async () => ({
@@ -253,6 +450,39 @@ function sampleConsolidator(): SleepConsolidator {
       place_memories: ["home", "quiet corner"],
       project_memories: ["Doorway Repair: Keep the entrance dry and bright."],
       creative_motifs: ["The doorway looked warm in the rain."]
+    })),
+    reflectDay: vi.fn(async () => ({
+      summary: "The sunrise at home felt worth carrying forward.",
+      event_kind: "wonder",
+      salience: 0.74,
+      dominant_emotions: ["awed", "hopeful"],
+      appraisal: {
+        curiosity: 0.58,
+        comfort: 0.42,
+        wonder: 0.82
+      },
+      regulation: {
+        arousal: 0.34,
+        resolve: 0.3,
+        recovery: 0.48
+      },
+      subject: {
+        kind: "place",
+        label: "sunrise ridge"
+      },
+      place: {
+        kind: "awe_site",
+        label: "sunrise ridge",
+        location: { x: 2, y: 64, z: 2 },
+        salience: 0.76,
+        revisit_policy: "open"
+      },
+      observation: {
+        category: "beauty",
+        summary: "The sunrise over home steadied something in him.",
+        tags: ["wonder", "sunrise", "home"],
+        importance: 0.74
+      }
     }))
   };
 }

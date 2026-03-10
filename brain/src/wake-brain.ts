@@ -98,7 +98,11 @@ function replanLevelFor(trigger: ReplanTrigger): ReplanLevel {
   if (["spawn", "death", "respawn", "wake", "damage", "hostile_detection", "task_failure", "protected_area_conflict"].includes(trigger)) {
     return "hard";
   }
-  if (["dawn", "dusk", "hunger_threshold", "inventory_change", "player_interaction", "task_completion", "idle_check"].includes(trigger)) {
+  if (
+    ["social_contact", "bonding", "birth", "wonder", "dawn", "dusk", "hunger_threshold", "inventory_change", "player_interaction", "task_completion", "idle_check"].includes(
+      trigger
+    )
+  ) {
     return "soft";
   }
   return "micro";
@@ -488,11 +492,15 @@ export class WakeBrain {
     memory: MemoryState,
     trigger: ReplanTrigger
   ): SurvivalIntentPlan | undefined {
-    if (trigger !== "death" && trigger !== "respawn") {
+    if (!["death", "respawn", "social_contact", "bonding", "birth", "wonder"].includes(trigger)) {
       return undefined;
     }
 
-    const intent = emotionInterruptIntent(memory, frame, trigger);
+    const intent = emotionInterruptIntent(
+      memory,
+      frame,
+      trigger as Extract<ReplanTrigger, "death" | "respawn" | "social_contact" | "bonding" | "birth" | "wonder">
+    );
     if (!intent) {
       return undefined;
     }
@@ -513,13 +521,31 @@ export class WakeBrain {
           ? ["the current surroundings are assessed"]
           : intent.intent_type === "recover"
             ? ["health, food, or calm improves"]
+            : intent.intent_type === "socialize"
+              ? ["a warm exchange happens"]
+              : intent.intent_type === "tend_livestock"
+                ? ["the animals are checked or cared for"]
             : ["a safer position is reached"],
       dialogue: intent.dialogue,
       observation: intent.observation,
       observationTags: intent.observation_tags,
       project: {
-        title: trigger === "death" ? "Recover after death" : "Reorient after respawn",
-        kind: "recovery",
+        title:
+          trigger === "death"
+            ? "Recover after death"
+            : trigger === "respawn"
+              ? "Reorient after respawn"
+              : trigger === "birth"
+                ? "Care for new life"
+                : trigger === "wonder"
+                  ? "Honor a wonder moment"
+                  : "Answer a meaningful bond",
+        kind:
+          intent.intent_type === "socialize"
+            ? "social"
+            : intent.intent_type === "tend_livestock"
+              ? "livestock"
+              : "recovery",
         status: "active",
         summary: intent.reason,
         location: intent.target ?? fallbackLocation
@@ -1139,19 +1165,41 @@ function shouldTendLivestock(frame: PerceptionFrame, memory: MemoryState): boole
   if (frame.livestock_state.welfareFlags.length > 0) {
     return true;
   }
+  if (
+    memory.emotion_core.active_episode?.kind === "nurture" ||
+    memory.emotion_core.bonded_entities.some((bond) => bond.kind === "herd" && bond.attachment >= 0.45)
+  ) {
+    return true;
+  }
   return Object.entries(frame.livestock_state.targetRanges).some(([species, range]) => (frame.livestock_state.counts[species] ?? 0) < range.min);
 }
 
 function shouldSocialize(frame: PerceptionFrame, memory: MemoryState, values: ValueProfile): boolean {
   const playersNearby = frame.nearby_entities.some((entity) => entity.type === "player");
+  const bondedPlayerNearby = frame.nearby_entities.some(
+    (entity) =>
+      entity.type === "player" &&
+      memory.emotion_core.bonded_entities.some((bond) => bond.kind === "player" && bond.label.toLowerCase() === entity.name.toLowerCase() && bond.attachment >= 0.42)
+  );
+  const wonderPull =
+    frame.notable_places.length > 0 &&
+    memory.personality_profile.traits.openness >= 0.78 &&
+    memory.personality_profile.traits.extraversion <= 0.35 &&
+    !bondedPlayerNearby;
+  if (wonderPull) {
+    return false;
+  }
   return (
     playersNearby &&
     memory.bootstrap_progress.shelterSecured &&
+    frame.combat_state.hostilesNearby === 0 &&
     (values.hospitality > 0.52 ||
       values.sociability > 0.55 ||
       memory.affect.loneliness > 0.42 ||
       memory.need_state.relatedness > 0.45 ||
-      memory.personality_profile.traits.extraversion > 0.62)
+      memory.personality_profile.traits.extraversion > 0.62 ||
+      memory.emotion_core.active_episode?.kind === "attachment" ||
+      bondedPlayerNearby)
   );
 }
 
@@ -1159,7 +1207,17 @@ function socialDialogue(frame: PerceptionFrame, memory: MemoryState): string {
   const playerName = frame.nearby_entities.find((entity) => entity.type === "player")?.name;
   const opening = playerName ? `Hello ${playerName}.` : "Hello there.";
   const selfIntro = memory.self_name ? `I'm ${memory.self_name}.` : "";
-  const mood = memory.affect.wonder > 0.6 ? "It feels good to share this part of the world." : "I'm glad for the company.";
+  const bond = playerName
+    ? memory.emotion_core.bonded_entities.find((entity) => entity.kind === "player" && entity.label.toLowerCase() === playerName.toLowerCase())
+    : undefined;
+  const mood =
+    memory.emotion_core.active_episode?.kind === "attachment"
+      ? "Your being here changes the feeling of this place."
+      : bond && bond.attachment >= 0.42
+        ? "It's good to see you again."
+        : memory.affect.wonder > 0.6
+          ? "It feels good to share this part of the world."
+          : "I'm glad for the company.";
   return [opening, selfIntro, mood].filter(Boolean).join(" ");
 }
 
@@ -1534,6 +1592,12 @@ function emotionBias(
 function emotionObservationCategory(intentType: SurvivalIntentPlan["intentType"]): MemoryObservation["category"] {
   if (intentType === "recover") {
     return "recovery";
+  }
+  if (intentType === "socialize") {
+    return "social";
+  }
+  if (intentType === "tend_livestock") {
+    return "livestock";
   }
   if (intentType === "observe") {
     return "orientation";

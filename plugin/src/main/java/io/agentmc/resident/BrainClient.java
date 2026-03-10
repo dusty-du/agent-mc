@@ -12,8 +12,11 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
@@ -162,6 +165,25 @@ public final class BrainClient {
         return postJson(payload);
     }
 
+    public CompletableFuture<Boolean> postAnimalBond(Player resident, Entity animal, String reason, String bondKind) {
+        LinkedHashMap<String, Object> payload = basePayload("animal_bond", resident);
+        payload.put("reason", reason);
+        payload.put("bond_kind", bondKind);
+        payload.put("animal", buildAnimalPayload(animal));
+        return postJson(payload);
+    }
+
+    public CompletableFuture<Boolean> postAnimalBirth(Player resident, LivingEntity animal, String breederName) {
+        LinkedHashMap<String, Object> payload = basePayload("animal_birth", resident);
+        payload.put("animal", buildAnimalBirthPayload(animal));
+        if (breederName != null && !breederName.isBlank()) {
+            LinkedHashMap<String, Object> breeder = new LinkedHashMap<>();
+            breeder.put("name", breederName);
+            payload.put("breeder", breeder);
+        }
+        return postJson(payload);
+    }
+
     public CompletableFuture<Boolean> postWorldWeather(World world, boolean toWeatherState) {
         LinkedHashMap<String, Object> payload = basePayload("world_weather");
         payload.put("world", buildWorldPayload(world));
@@ -192,6 +214,28 @@ public final class BrainClient {
         payload.put("name", player.getName());
         payload.put("world", player.getWorld().getName());
         payload.put("location", buildLocationPayload(location));
+        return payload;
+    }
+
+    private Map<String, Object> buildAnimalPayload(Entity animal) {
+        LinkedHashMap<String, Object> payload = new LinkedHashMap<>();
+        payload.put("id", animal.getUniqueId().toString());
+        payload.put("species", animal.getType().getKey().getKey());
+        if (animal.customName() != null) {
+            payload.put("name", PlainTextComponentSerializer.plainText().serialize(animal.customName()));
+        }
+        payload.put("location", buildLocationPayload(animal.getLocation()));
+        return payload;
+    }
+
+    private Map<String, Object> buildAnimalBirthPayload(LivingEntity animal) {
+        LinkedHashMap<String, Object> payload = new LinkedHashMap<>();
+        payload.put("species", animal.getType().getKey().getKey());
+        payload.put("herd_id", animal.getType().getKey().getKey());
+        if (animal.customName() != null) {
+            payload.put("offspring_name", PlainTextComponentSerializer.plainText().serialize(animal.customName()));
+        }
+        payload.put("location", buildLocationPayload(animal.getLocation()));
         return payload;
     }
 

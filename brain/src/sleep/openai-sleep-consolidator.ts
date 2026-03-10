@@ -2,13 +2,17 @@ import {
   ConsolidationRecord,
   CultureSignal,
   DailyOutcome,
+  DayLifeReflectionInput,
+  DayLifeReflectionObservation,
+  DayLifeReflectionResult,
+  DayLifeReflectionRecord,
   MemoryBundle
 } from "@resident/shared";
 import {
+  ReflectiveConsolidator,
   SleepConsolidationError,
   SleepConsolidationInput,
-  SleepConsolidationResult,
-  SleepConsolidator
+  SleepConsolidationResult
 } from "./sleep-core";
 
 type OpenAIResponse = {
@@ -18,7 +22,7 @@ type OpenAIResponse = {
   }>;
 };
 
-export class OpenAISleepConsolidator implements SleepConsolidator {
+export class OpenAIReflectiveConsolidator implements ReflectiveConsolidator {
   constructor(
     private readonly apiKey: string,
     public readonly modelName: string,
@@ -26,6 +30,45 @@ export class OpenAISleepConsolidator implements SleepConsolidator {
   ) {}
 
   async synthesize(input: SleepConsolidationInput): Promise<SleepConsolidationResult> {
+    const payload = await this.requestStructuredJson(
+      [
+        "You are the reflective autobiographical core for an autonomous Minecraft resident.",
+        "Perform overnight consolidation only.",
+        "Use the daytime reflection records as same-day meaning traces, then compress them into stable next-day themes.",
+        "Do not plan wake-time actions and do not invent new commitments.",
+        "Preserve meaning, safety, hospitality, home, beauty, bonding, nurture, wonder, and recovery.",
+        "Return only strict JSON."
+      ].join(" "),
+      buildOvernightPayload(input)
+    );
+
+    try {
+      return JSON.parse(payload) as SleepConsolidationResult;
+    } catch (error) {
+      throw new SleepConsolidationError("Sleep consolidation returned invalid JSON.", this.modelName, error);
+    }
+  }
+
+  async reflectDay(input: DayLifeReflectionInput): Promise<DayLifeReflectionResult> {
+    const payload = await this.requestStructuredJson(
+      [
+        "You are the reflective life-core for an autonomous Minecraft resident during the awake loop.",
+        "Appraise one salient event that already happened and return an emotional patch, not a plan.",
+        "You may strengthen or contextualize emotions, bonds, and places, and you may suggest an interrupt when the moment deserves follow-up.",
+        "Do not choose actions, do not create commitments, and do not rewrite full memory.",
+        "Return only strict JSON."
+      ].join(" "),
+      buildDayReflectionPayload(input)
+    );
+
+    try {
+      return JSON.parse(payload) as DayLifeReflectionResult;
+    } catch (error) {
+      throw new SleepConsolidationError("Daytime life reflection returned invalid JSON.", this.modelName, error);
+    }
+  }
+
+  private async requestStructuredJson(systemPrompt: string, payload: Record<string, unknown>): Promise<string> {
     const response = await fetch(`${this.baseUrl}/responses`, {
       method: "POST",
       headers: {
@@ -41,14 +84,7 @@ export class OpenAISleepConsolidator implements SleepConsolidator {
             content: [
               {
                 type: "input_text",
-                text:
-                  "You are sleep-core for an autonomous Minecraft resident. " +
-                  "Perform overnight autobiographical consolidation only. " +
-                  "The bundle includes personality, current needs, recent action snapshots, bootstrap progress, and emotion-core state. " +
-                  "Do not plan wake-time actions and do not invent new commitments. " +
-                  "Name emotional carry-over themes like wary, resolved, relieved, connected, or hopeful when they are justified by the day. " +
-                  "Preserve meaning, safety, hospitality, home, and beauty. " +
-                  "Return only strict JSON."
+                text: systemPrompt
               }
             ]
           },
@@ -57,7 +93,7 @@ export class OpenAISleepConsolidator implements SleepConsolidator {
             content: [
               {
                 type: "input_text",
-                text: JSON.stringify(buildPayload(input))
+                text: JSON.stringify(payload)
               }
             ]
           }
@@ -66,47 +102,46 @@ export class OpenAISleepConsolidator implements SleepConsolidator {
     });
 
     if (!response.ok) {
-      throw new SleepConsolidationError(
-        `Sleep consolidation request failed with status ${response.status}.`,
-        this.modelName
-      );
+      throw new SleepConsolidationError(`Reflective model request failed with status ${response.status}.`, this.modelName);
     }
 
     const body = (await response.json()) as OpenAIResponse;
-    const payload = extractOutputText(body);
-    if (!payload) {
-      throw new SleepConsolidationError("Sleep consolidation returned no output text.", this.modelName);
+    const output = extractOutputText(body);
+    if (!output) {
+      throw new SleepConsolidationError("Reflective model returned no output text.", this.modelName);
     }
-
-    try {
-      return JSON.parse(payload) as SleepConsolidationResult;
-    } catch (error) {
-      throw new SleepConsolidationError("Sleep consolidation returned invalid JSON.", this.modelName, error);
-    }
+    return output;
   }
 }
 
-export function createOpenAISleepConsolidatorFromEnv(): OpenAISleepConsolidator {
-  const model = process.env.RESIDENT_SLEEP_OPENAI_MODEL?.trim();
+export function createOpenAIReflectiveConsolidatorFromEnv(): OpenAIReflectiveConsolidator {
+  const model = process.env.RESIDENT_REFLECTIVE_OPENAI_MODEL?.trim();
   if (!model) {
-    throw new SleepConsolidationError("RESIDENT_SLEEP_OPENAI_MODEL is required for sleep-core startup.");
+    throw new SleepConsolidationError("RESIDENT_REFLECTIVE_OPENAI_MODEL is required for reflective-core startup.");
   }
 
   const apiKey = process.env.OPENAI_API_KEY?.trim();
   if (!apiKey) {
     throw new SleepConsolidationError(
-      "RESIDENT_SLEEP_OPENAI_MODEL is set but OPENAI_API_KEY is missing.",
+      "RESIDENT_REFLECTIVE_OPENAI_MODEL is set but OPENAI_API_KEY is missing.",
       model
     );
   }
 
-  return new OpenAISleepConsolidator(apiKey, model);
+  return new OpenAIReflectiveConsolidator(apiKey, model);
 }
 
-function buildPayload(input: SleepConsolidationInput): {
+function buildOvernightPayload(input: SleepConsolidationInput): {
   bundle: MemoryBundle;
   outcome: DailyOutcome;
   recent_culture_signals: CultureSignal[];
+  recent_day_reflections: Array<{
+    created_at: string;
+    trigger: string;
+    summary: string;
+    event_kind: string;
+    dominant_emotions: string[];
+  }>;
   recent_consolidations: Array<{
     day_number: number;
     summary: string;
@@ -121,6 +156,13 @@ function buildPayload(input: SleepConsolidationInput): {
     bundle: input.bundle,
     outcome: input.outcome,
     recent_culture_signals: input.recentCultureSignals,
+    recent_day_reflections: input.recentDayReflections.map((record) => ({
+      created_at: record.created_at,
+      trigger: record.trigger,
+      summary: record.summary,
+      event_kind: record.result.event_kind,
+      dominant_emotions: record.result.dominant_emotions
+    })),
     recent_consolidations: input.recentConsolidations.map((record: ConsolidationRecord) => ({
       day_number: record.dayNumber,
       summary: record.summary,
@@ -137,6 +179,108 @@ function buildPayload(input: SleepConsolidationInput): {
       place_memories: ["string"],
       project_memories: ["string"],
       creative_motifs: ["string"]
+    }
+  };
+}
+
+function buildDayReflectionPayload(input: DayLifeReflectionInput): {
+  trigger: string;
+  previous_perception: DayLifeReflectionInput["previousPerception"];
+  current_perception: DayLifeReflectionInput["currentPerception"];
+  report?: DayLifeReflectionInput["report"];
+  memory: DayLifeReflectionInput["memory"];
+  overnight?: DayLifeReflectionInput["overnight"];
+  recent_observations: DayLifeReflectionObservation[];
+  recent_action_snapshot?: DayLifeReflectionInput["recentActionSnapshot"];
+  latest_day_reflections: Array<{
+    created_at: string;
+    trigger: string;
+    summary: string;
+    dominant_emotions: string[];
+  }>;
+  schema: Record<string, unknown>;
+} {
+  return {
+    trigger: input.trigger,
+    previous_perception: input.previousPerception,
+    current_perception: input.currentPerception,
+    report: input.report,
+    memory: input.memory,
+    overnight: input.overnight,
+    recent_observations: input.recentObservations.map((observation) => ({
+      category: observation.category,
+      summary: observation.summary,
+      tags: observation.tags,
+      importance: observation.importance
+    })),
+    recent_action_snapshot: input.recentActionSnapshot,
+    latest_day_reflections: input.latestDayReflections.map((record: DayLifeReflectionRecord) => ({
+      created_at: record.created_at,
+      trigger: record.trigger,
+      summary: record.summary,
+      dominant_emotions: record.result.dominant_emotions
+    })),
+    schema: {
+      summary: "string",
+      event_kind: "death | damage | combat | loss | beauty | social | attachment | nurture | wonder | play | milestone | achievement | safety",
+      salience: "number 0..1",
+      dominant_emotions: ["string"],
+      appraisal: {
+        threat: "number 0..1",
+        loss: "number 0..1",
+        pain: "number 0..1",
+        curiosity: "number 0..1",
+        connection: "number 0..1",
+        comfort: "number 0..1",
+        mastery: "number 0..1",
+        wonder: "number 0..1"
+      },
+      regulation: {
+        arousal: "number 0..1",
+        shock: "number 0..1",
+        vigilance: "number 0..1",
+        resolve: "number 0..1",
+        recovery: "number 0..1"
+      },
+      action_biases: {
+        avoid_risk: "number 0..1",
+        seek_shelter: "number 0..1",
+        seek_recovery: "number 0..1",
+        seek_company: "number 0..1",
+        seek_mastery: "number 0..1",
+        seek_wonder: "number 0..1",
+        cautious_revisit: "number 0..1"
+      },
+      subject: {
+        kind: "player | pet | herd | place | moment",
+        label: "string"
+      },
+      place: {
+        kind: "death_site | comfort_site | awe_site | nursery_site | bond_site",
+        label: "string",
+        location: { x: "number", y: "number", z: "number" },
+        world: "string",
+        salience: "number 0..1",
+        revisit_policy: "avoid | cautious | open"
+      },
+      bond: {
+        kind: "player | pet | herd",
+        label: "string",
+        bond_kind: "familiar | companion | caretaking",
+        delta_familiarity: "number 0..1",
+        delta_attachment: "number 0..1",
+        home_affinity: "number 0..1"
+      },
+      interrupt: {
+        trigger: "death | respawn | social_contact | bonding | birth | wonder",
+        reason: "string"
+      },
+      observation: {
+        category: "discovery | food | crafting | building | rebuild | livestock | combat | social | beauty | sleep | danger | recovery | orientation | project | weather | hospitality",
+        summary: "string",
+        tags: ["string"],
+        importance: "number 0..1"
+      }
     }
   };
 }

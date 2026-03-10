@@ -1,7 +1,10 @@
 import {
   ActionReport,
   AffectState,
+  BondedEntity,
+  BondedEntityBondKind,
   BootstrapProgress,
+  DayLifeReflectionResult,
   EmotionActionBiases,
   EmotionAppraisal,
   EmotionCoreState,
@@ -56,7 +59,33 @@ export interface ResidentRespawnEmotionEvent {
   bed_spawn?: boolean;
 }
 
-export type ResidentEmotionEvent = ResidentDeathEmotionEvent | ResidentRespawnEmotionEvent;
+export interface AnimalBondEmotionEvent {
+  type: "animal_bond";
+  timestamp: string;
+  cause_tags: string[];
+  animal_label: string;
+  animal_id?: string;
+  bond_kind?: BondedEntityBondKind;
+  location?: Vec3;
+  world?: string;
+}
+
+export interface AnimalBirthEmotionEvent {
+  type: "animal_birth";
+  timestamp: string;
+  cause_tags: string[];
+  species: string;
+  offspring_label?: string;
+  herd_id?: string;
+  location?: Vec3;
+  world?: string;
+}
+
+export type ResidentEmotionEvent =
+  | ResidentDeathEmotionEvent
+  | ResidentRespawnEmotionEvent
+  | AnimalBondEmotionEvent
+  | AnimalBirthEmotionEvent;
 
 export type EmotionCandidateKind =
   | "bootstrap"
@@ -70,7 +99,7 @@ export type EmotionCandidateKind =
   | "observe";
 
 export interface EmotionInterruptIntent {
-  intent_type: "move" | "observe" | "recover" | "retreat";
+  intent_type: "move" | "observe" | "recover" | "retreat" | "socialize" | "tend_livestock";
   target?: Vec3;
   reason: string;
   dialogue: string;
@@ -78,8 +107,27 @@ export interface EmotionInterruptIntent {
   observation_tags: string[];
 }
 
+export interface DayLifeReflectionApplyContext {
+  trigger: ReplanTrigger;
+  timestamp: string;
+  perception: PerceptionFrame;
+  personality: ResidentPersonalityProfile;
+}
+
 const MAX_EPISODES = 12;
 const MAX_TAGGED_PLACES = 8;
+const MAX_BONDED_ENTITIES = 12;
+const POSITIVE_EPISODE_KINDS = new Set<EmotionEpisode["kind"]>([
+  "beauty",
+  "social",
+  "attachment",
+  "nurture",
+  "wonder",
+  "play",
+  "milestone",
+  "achievement",
+  "safety"
+]);
 const DEFAULT_DOMINANT = ["steady"];
 
 export function createEmotionCoreState(now = new Date().toISOString()): EmotionCoreState {
@@ -92,6 +140,7 @@ export function createEmotionCoreState(now = new Date().toISOString()): EmotionC
     dominant_emotions: [...DEFAULT_DOMINANT],
     recent_episodes: [],
     tagged_places: [],
+    bonded_entities: [],
     last_event_at: now
   };
 }
@@ -103,6 +152,8 @@ export function syncEmotionCoreFromPerception(
 ): EmotionCoreState {
   const now = new Date().toISOString();
   const core = cloneEmotionCore(current ?? createEmotionCoreState(now));
+  const bonded_entities = evolveBondedEntities(core.bonded_entities, perception, now);
+  const nearbyBondStrength = nearbyBondSignal(bonded_entities, perception);
   const safetySupport = clamp(
     perception.home_state.shelterScore * 0.32 +
       (perception.combat_state.hostilesNearby === 0 ? 0.18 : 0) +
@@ -121,10 +172,13 @@ export function syncEmotionCoreFromPerception(
   const nearbyPlayer = perception.nearby_entities.some((entity) => entity.type === "player");
   const deathSitePressure = nearestTaggedPlaceDistance(core.tagged_places, "death_site", perception.position, 24);
   const unresolvedDeath = core.active_episode?.kind === "death" && !core.active_episode.resolved;
+  const sunriseWonder = wonderMomentSignal(perception, context);
+  const nurtureSignal = nurtureMomentSignal(perception);
   const wonderSupport = clamp(
     context.affect.wonder * 0.6 +
       (perception.notable_places.length > 0 ? 0.18 : 0) +
-      (perception.terrain_affordances?.some((entry) => entry.type === "view" || entry.type === "water") ? 0.12 : 0)
+      (perception.terrain_affordances?.some((entry) => entry.type === "view" || entry.type === "water") ? 0.12 : 0) +
+      sunriseWonder * 0.26
   );
   const masterySupport = clamp(
     (context.bootstrap.toolsReady ? 0.24 : 0.06) +
@@ -163,11 +217,12 @@ export function syncEmotionCoreFromPerception(
     connection: clamp(
       context.affect.belonging * 0.34 +
         (nearbyPlayer ? 0.22 : 0) +
+        nearbyBondStrength * 0.26 +
         clamp(1 - context.needs.relatedness) * 0.14 -
         clamp(context.needs.relatedness * 0.08)
     ),
-    comfort: clamp(comfortSupport + safetySupport * 0.18 - deathSitePressure * 0.16 + overnightSettled),
-    mastery: clamp(masterySupport + clamp(1 - context.needs.competence) * 0.2),
+    comfort: clamp(comfortSupport + safetySupport * 0.18 - deathSitePressure * 0.16 + overnightSettled + nearbyBondStrength * 0.08),
+    mastery: clamp(masterySupport + clamp(1 - context.needs.competence) * 0.2 + nurtureSignal * 0.08),
     wonder: clamp(wonderSupport - deathSitePressure * 0.1)
   });
 
@@ -187,11 +242,10 @@ export function syncEmotionCoreFromPerception(
   });
 
   const active_episode = evolveActiveEpisode(core.active_episode, axes, regulation, perception, now);
-  const tagged_places = updatePassiveTaggedPlaces(core.tagged_places, perception, context.affect, now);
+  const tagged_places = updatePassiveTaggedPlaces(core.tagged_places, perception, context.affect, bonded_entities, now);
   const dominant_emotions = deriveDominantEmotions(axes, regulation);
   const action_biases = deriveActionBiases(axes, regulation, active_episode, tagged_places);
-
-  return {
+  let next: EmotionCoreState = {
     ...core,
     axes,
     regulation,
@@ -200,7 +254,19 @@ export function syncEmotionCoreFromPerception(
     active_episode,
     recent_episodes: trimEpisodes(syncRecentEpisodes(core.recent_episodes, active_episode), now),
     tagged_places,
+    bonded_entities,
     last_event_at: active_episode?.updated_at ?? core.last_event_at ?? now
+  };
+
+  const perceptionEpisode = inferPerceptionLifeEpisode(core, next, perception, context, now);
+  if (perceptionEpisode) {
+    next = integrateEpisode(next, perceptionEpisode.episode, perceptionEpisode.interrupt);
+  }
+
+  return {
+    ...next,
+    bonded_entities: trimBondedEntities(next.bonded_entities),
+    tagged_places: trimTaggedPlaces(next.tagged_places)
   };
 }
 
@@ -223,10 +289,23 @@ export function applyEmotionActionReport(
 ): EmotionCoreState {
   const core = cloneEmotionCore(current ?? createEmotionCoreState());
   const episode = episodeFromActionReport(report, core);
+  const bonded_entities = updateBondedEntitiesFromActionReport(core.bonded_entities, report);
   if (!episode) {
-    return core;
+    return {
+      ...core,
+      bonded_entities
+    };
   }
-  return integrateEpisode(core, episode);
+  return {
+    ...integrateEpisode(
+      {
+        ...core,
+        bonded_entities
+      },
+      episode
+    ),
+    bonded_entities
+  };
 }
 
 export function applyResidentEmotionEvent(
@@ -236,6 +315,158 @@ export function applyResidentEmotionEvent(
   now = event.timestamp
 ): EmotionCoreState {
   const core = cloneEmotionCore(current ?? createEmotionCoreState(now));
+
+  if (event.type === "animal_bond") {
+    const appraisal: EmotionAppraisal = {
+      threat: 0.04,
+      loss: 0.02,
+      pain: 0.01,
+      curiosity: clamp(0.24 + personality.traits.openness * 0.18),
+      connection: clamp(0.76 + personality.traits.agreeableness * 0.12),
+      comfort: 0.44,
+      mastery: 0.28,
+      wonder: 0.26
+    };
+    const regulation: EmotionRegulation = {
+      arousal: 0.34,
+      shock: 0.01,
+      vigilance: 0.06,
+      resolve: 0.36,
+      recovery: 0.64
+    };
+    const label = event.animal_label.trim() || "animal companion";
+    const episode = buildEpisode(
+      "attachment",
+      `A bond formed with ${label}.`,
+      now,
+      event.location,
+      compact(["bonding", ...event.cause_tags, label]),
+      appraisal,
+      regulation,
+      "open",
+      {
+        subject_kind: "pet",
+        subject_id_or_label: event.animal_id ?? label,
+        novelty: 0.92
+      }
+    );
+    const next = integrateEpisode(
+      {
+        ...core,
+        bonded_entities: upsertBondedEntity(core.bonded_entities, {
+          id: event.animal_id ?? `pet:${label.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+          kind: "pet",
+          label,
+          bond_kind: event.bond_kind ?? "companion",
+          familiarity: 0.56,
+          attachment: 0.74,
+          last_meaningful_contact_at: now,
+          home_affinity: event.location ? comfortAtLocation(core.tagged_places, event.location) : undefined,
+          place_affinity_label: event.location ? "bonded place" : undefined
+        })
+      },
+      episode,
+      canSoftInterrupt(core, personality) && event.location
+        ? {
+            trigger: "bonding",
+            reason: `Bonding with ${label} deserves a deliberate response while the moment is fresh.`,
+            created_at: now,
+            episode_id: episode.id
+          }
+        : undefined
+    );
+    return updateTaggedPlace(
+      next,
+      event.location
+        ? {
+            kind: "bond_site",
+            label,
+            location: { ...event.location },
+            world: event.world,
+            salience: 0.68,
+            cause_tags: ["bonding", label],
+            revisit_policy: "open",
+            updated_at: now
+          }
+        : undefined
+    );
+  }
+
+  if (event.type === "animal_birth") {
+    const label = event.offspring_label?.trim() || `${event.species} newborns`;
+    const appraisal: EmotionAppraisal = {
+      threat: 0.04,
+      loss: 0.02,
+      pain: 0.01,
+      curiosity: clamp(0.26 + personality.traits.openness * 0.12),
+      connection: clamp(0.56 + personality.traits.agreeableness * 0.16),
+      comfort: 0.34,
+      mastery: 0.42,
+      wonder: 0.36
+    };
+    const regulation: EmotionRegulation = {
+      arousal: 0.38,
+      shock: 0.01,
+      vigilance: 0.12,
+      resolve: 0.44,
+      recovery: 0.58
+    };
+    const episode = buildEpisode(
+      "nurture",
+      `New life arrived among the ${event.species}.`,
+      now,
+      event.location,
+      compact(["birth", event.species, ...event.cause_tags]),
+      appraisal,
+      regulation,
+      "open",
+      {
+        subject_kind: "herd",
+        subject_id_or_label: event.herd_id ?? event.species,
+        novelty: 0.86
+      }
+    );
+    const next = integrateEpisode(
+      {
+        ...core,
+        bonded_entities: upsertBondedEntity(core.bonded_entities, {
+          id: event.herd_id ?? `herd:${event.species}`,
+          kind: "herd",
+          label: `${event.species} herd`,
+          bond_kind: "caretaking",
+          familiarity: 0.48,
+          attachment: 0.52,
+          last_meaningful_contact_at: now,
+          home_affinity: event.location ? comfortAtLocation(core.tagged_places, event.location) : undefined,
+          place_affinity_label: event.location ? "nursery" : undefined
+        })
+      },
+      episode,
+      canSoftInterrupt(core, personality)
+        ? {
+            trigger: "birth",
+            reason: "New life in the herd is meaningful enough to bias the next move toward care.",
+            created_at: now,
+            episode_id: episode.id
+          }
+        : undefined
+    );
+    return updateTaggedPlace(
+      next,
+      event.location
+        ? {
+            kind: "nursery_site",
+            label,
+            location: { ...event.location },
+            world: event.world,
+            salience: 0.7,
+            cause_tags: ["birth", event.species],
+            revisit_policy: "open",
+            updated_at: now
+          }
+        : undefined
+    );
+  }
 
   if (event.type === "resident_death") {
     const appraisal: EmotionAppraisal = {
@@ -366,6 +597,118 @@ export function applyResidentEmotionEvent(
   );
 }
 
+export function applyDayLifeReflection(
+  current: EmotionCoreState | undefined,
+  reflection: DayLifeReflectionResult,
+  context: DayLifeReflectionApplyContext
+): EmotionCoreState {
+  const core = cloneEmotionCore(current ?? createEmotionCoreState(context.timestamp));
+  const focalLocation = reflection.place?.location ? { ...reflection.place.location } : { ...context.perception.position };
+  const subject = reflection.subject ?? (reflection.bond ? { kind: reflection.bond.kind, label: reflection.bond.label } : undefined);
+  const causeTags = compact([
+    reflection.event_kind,
+    context.trigger,
+    subject?.label,
+    reflection.place?.label
+  ]);
+  const baseEpisode = buildEpisode(
+    reflection.event_kind,
+    reflection.summary,
+    context.timestamp,
+    focalLocation,
+    causeTags,
+    applyAppraisalPatch(defaultAppraisalForReflection(reflection.event_kind), reflection.appraisal),
+    applyRegulationPatch(defaultRegulationForReflection(reflection.event_kind), reflection.regulation),
+    revisitPolicyForReflection(reflection.event_kind, reflection.appraisal, reflection.place?.revisit_policy),
+    {
+      subject_kind: subject?.kind,
+      subject_id_or_label: subject?.label,
+      novelty: clamp(reflection.salience)
+    }
+  );
+  const matchingEpisode = findMatchingReflectionEpisode(core, reflection, focalLocation);
+  const episode = matchingEpisode
+    ? {
+        ...baseEpisode,
+        id: matchingEpisode.id,
+        started_at: matchingEpisode.started_at,
+        source_trigger: context.trigger,
+        cause_tags: compact([...matchingEpisode.cause_tags, ...baseEpisode.cause_tags]),
+        respawn_location: matchingEpisode.respawn_location,
+        inventory_loss: matchingEpisode.inventory_loss.map((item) => ({ ...item })),
+        appraisal: blendAxes(matchingEpisode.appraisal, baseEpisode.appraisal, 0.58),
+        regulation: blendRegulation(matchingEpisode.regulation, baseEpisode.regulation, 0.58)
+      }
+    : {
+        ...baseEpisode,
+        source_trigger: context.trigger
+      };
+  episode.dominant_emotions = mergeDominantEmotions(
+    reflection.dominant_emotions,
+    deriveDominantEmotions(episode.appraisal, episode.regulation)
+  );
+  episode.intensity = clamp(Math.max(intensityFrom(episode.appraisal, episode.regulation), reflection.salience));
+
+  const bonded_entities = reflection.bond
+    ? upsertBondedEntity(core.bonded_entities, mergeBondFromReflection(core.bonded_entities, reflection, context))
+    : core.bonded_entities;
+
+  let next = integrateEpisode(
+    {
+      ...core,
+      bonded_entities
+    },
+    episode
+  );
+
+  if (reflection.place) {
+    next = updateTaggedPlace(next, {
+      kind: reflection.place.kind,
+      label: reflection.place.label,
+      location: { ...reflection.place.location },
+      world: reflection.place.world,
+      salience: reflection.place.salience ?? clamp(0.28 + reflection.salience * 0.48),
+      cause_tags: compact([reflection.event_kind, context.trigger, subject?.label]),
+      revisit_policy: reflection.place.revisit_policy ?? episode.revisit_policy,
+      updated_at: context.timestamp
+    });
+  }
+
+  if (reflection.action_biases) {
+    const action_biases = { ...next.action_biases };
+    for (const [key, value] of Object.entries(reflection.action_biases) as Array<[keyof EmotionActionBiases, number | undefined]>) {
+      if (value === undefined) {
+        continue;
+      }
+      action_biases[key] = blend(action_biases[key], value, 0.55);
+    }
+    next = {
+      ...next,
+      action_biases
+    };
+  }
+
+  const candidateInterrupt = reflection.interrupt
+    ? {
+        trigger: reflection.interrupt.trigger,
+        reason: reflection.interrupt.reason,
+        created_at: context.timestamp,
+        episode_id: next.active_episode?.id
+      }
+    : undefined;
+
+  const pending_interrupt =
+    candidateInterrupt && (isHardInterrupt(candidateInterrupt.trigger) || canSoftInterrupt(next, context.personality))
+      ? chooseStrongerInterrupt(next.pending_interrupt, candidateInterrupt)
+      : next.pending_interrupt;
+
+  return {
+    ...next,
+    pending_interrupt,
+    last_event_at: context.timestamp
+  };
+}
+
 export function consumePendingEmotionInterrupt(current: EmotionCoreState | undefined): EmotionCoreState {
   if (!current?.pending_interrupt) {
     return current ?? createEmotionCoreState();
@@ -379,9 +722,39 @@ export function consumePendingEmotionInterrupt(current: EmotionCoreState | undef
 export function emotionInterruptIntent(
   memory: MemoryState,
   frame: PerceptionFrame,
-  trigger: Extract<ReplanTrigger, "death" | "respawn">
+  trigger: EmotionInterrupt["trigger"]
 ): EmotionInterruptIntent | undefined {
   const active = memory.emotion_core.active_episode;
+  if (trigger === "wonder" && (active?.kind === "wonder" || active?.kind === "milestone" || active?.kind === "beauty")) {
+    return {
+      intent_type: "observe",
+      reason: "Awe deserves a brief, grounded pause when survival is stable.",
+      dialogue: composeEmotionDialogue(memory, frame, "I want to really see this before I hurry past it.", "observe"),
+      observation: "The resident noticed a wonder moment and chose to stop long enough to take it in.",
+      observation_tags: ["emotion", "wonder", "awe", "interrupt"]
+    };
+  }
+
+  if ((trigger === "social_contact" || trigger === "bonding") && (active?.kind === "attachment" || active?.kind === "social")) {
+    return {
+      intent_type: "socialize",
+      reason: "A fresh bond or reunion is meaningful enough to justify a warm exchange while it is safe.",
+      dialogue: composeEmotionDialogue(memory, frame, "I want to answer this company honestly instead of drifting past it.", "socialize"),
+      observation: "The resident is letting a new or renewed bond shape the next moment.",
+      observation_tags: ["emotion", trigger, "connection", "interrupt"]
+    };
+  }
+
+  if (trigger === "birth" && (active?.kind === "nurture" || active?.kind === "attachment")) {
+    return {
+      intent_type: "tend_livestock",
+      reason: "New life in the herd should bias the next step toward care and protection.",
+      dialogue: composeEmotionDialogue(memory, frame, "I want to check on them while this is still new and fragile.", "tend_livestock"),
+      observation: "The resident is shifting toward nurture after noticing a birth or vulnerable young animals.",
+      observation_tags: ["emotion", "birth", "nurture", "interrupt"]
+    };
+  }
+
   if (!active || active.kind !== "death") {
     if (trigger !== "respawn") {
       return undefined;
@@ -476,6 +849,9 @@ export function emotionCandidateBias(
   values: ValueProfile = DEFAULT_VALUE_PROFILE
 ): number {
   const biases = memory.emotion_core.action_biases;
+  const active = memory.emotion_core.active_episode;
+  const nearbyBondedPlayers = countNearbyBondedEntities(memory.emotion_core.bonded_entities, frame, "player");
+  const nearbyCaretakingBonds = countNearbyBondedEntities(memory.emotion_core.bonded_entities, frame, "herd");
   let score = 0;
 
   score -= biases.avoid_risk * (kind === "explore" ? 0.54 : kind === "social" ? 0.16 : kind === "farm" || kind === "livestock" ? 0.14 : 0);
@@ -485,7 +861,7 @@ export function emotionCandidateBias(
   score += biases.seek_company * (kind === "social" ? 0.26 : kind === "livestock" ? 0.08 : 0);
   score += biases.seek_wonder * (kind === "explore" ? 0.18 : kind === "observe" ? 0.08 : 0);
 
-  if (memory.emotion_core.active_episode?.kind === "death" && !memory.emotion_core.active_episode.resolved) {
+  if (active?.kind === "death" && !active.resolved) {
     if (!isPreparedForRevisit(memory, frame)) {
       score += kind === "observe" ? 0.18 : 0;
       score += kind === "craft" ? 0.14 : 0;
@@ -499,6 +875,33 @@ export function emotionCandidateBias(
 
   if (values.safety > 0.82) {
     score -= biases.avoid_risk * (kind === "explore" ? 0.12 : 0);
+  }
+
+  if ((active?.kind === "wonder" || active?.kind === "beauty") && frame.combat_state.hostilesNearby === 0) {
+    score += kind === "observe" ? 0.34 : 0;
+    score += kind === "explore" ? 0.16 : 0;
+    score -= kind === "store" ? 0.08 : 0;
+  }
+
+  if (active?.kind === "attachment" || nearbyBondedPlayers > 0) {
+    score += kind === "social" ? 0.34 + nearbyBondedPlayers * 0.08 : 0;
+    score += kind === "store" && frame.home_state.anchor ? 0.08 : 0;
+  }
+
+  if (active?.kind === "nurture" || nearbyCaretakingBonds > 0) {
+    score += kind === "livestock" ? 0.32 + nearbyCaretakingBonds * 0.1 : 0;
+    score += kind === "build" && frame.home_state.anchor ? 0.12 : 0;
+    score -= kind === "explore" ? 0.18 : 0;
+  }
+
+  if (active?.kind === "milestone") {
+    score += kind === "build" || kind === "store" ? 0.16 : 0;
+    score += kind === "observe" ? 0.1 : 0;
+  }
+
+  if (active?.kind === "play" && frame.combat_state.hostilesNearby === 0) {
+    score += kind === "social" ? 0.18 : 0;
+    score += kind === "observe" ? 0.1 : 0;
   }
 
   return score;
@@ -528,7 +931,7 @@ export function composeEmotionDialogue(
   intentType: string
 ): string {
   const active = memory.emotion_core.active_episode;
-  if (!active || active.kind !== "death" || active.resolved) {
+  if (!active || active.resolved) {
     const dominant = memory.emotion_core.dominant_emotions[0] ?? "steady";
     if (dominant === "hopeful") {
       return fallback.replace(/^I /, "I feel more resolved, and I ");
@@ -536,6 +939,35 @@ export function composeEmotionDialogue(
     if (dominant === "settled") {
       return fallback.replace(/^I /, "I feel steadier, and I ");
     }
+    return fallback;
+  }
+
+  if (active.kind === "wonder" || active.kind === "beauty") {
+    const subject = active.subject_id_or_label ?? frame.notable_places[0] ?? "this moment";
+    return `Something about ${subject} feels worth really noticing. ${fallback}`.trim();
+  }
+
+  if (active.kind === "attachment" || active.kind === "social") {
+    const subject = active.subject_id_or_label ?? "this company";
+    const prefix = active.cause_tags.includes("reunion") ? `${subject} being here again matters to me.` : `${subject} matters more than passing by politely.`;
+    return `${prefix} ${fallback}`.trim();
+  }
+
+  if (active.kind === "nurture") {
+    const subject = active.subject_id_or_label ?? "the herd";
+    return `${subject} feels newly vulnerable and important. ${fallback}`.trim();
+  }
+
+  if (active.kind === "play") {
+    return `This moment does not need to be useful to matter. ${fallback}`.trim();
+  }
+
+  if (active.kind === "milestone") {
+    const subject = active.subject_id_or_label ?? "this place";
+    return `${subject} feels like a first worth keeping. ${fallback}`.trim();
+  }
+
+  if (active.kind !== "death") {
     return fallback;
   }
 
@@ -639,27 +1071,39 @@ function evolveActiveEpisode(
   }
 
   const nearEpisode = episode.focal_location ? distanceBetween(episode.focal_location, perception.position) <= 18 : false;
+  const positiveEpisode = POSITIVE_EPISODE_KINDS.has(episode.kind) && episode.kind !== "safety";
+  const ageMs = Math.max(0, Date.parse(now) - Date.parse(episode.started_at));
   const next: EmotionEpisode = {
     ...episode,
     appraisal: blendAxes(episode.appraisal, {
       ...axes,
-      threat: clamp(axes.threat + (nearEpisode ? 0.12 : 0)),
-      loss: episode.kind === "death" ? Math.max(axes.loss, episode.appraisal.loss * 0.84) : axes.loss,
-      pain: episode.kind === "death" ? Math.max(axes.pain, episode.appraisal.pain * 0.76) : axes.pain
+      threat: clamp(axes.threat + (episode.kind === "death" && nearEpisode ? 0.12 : 0)),
+      loss: episode.kind === "death" ? Math.max(axes.loss, episode.appraisal.loss * 0.84) : positiveEpisode ? blend(episode.appraisal.loss, axes.loss, 0.52) : axes.loss,
+      pain: episode.kind === "death" ? Math.max(axes.pain, episode.appraisal.pain * 0.76) : positiveEpisode ? blend(episode.appraisal.pain, axes.pain, 0.56) : axes.pain,
+      curiosity: positiveEpisode ? Math.max(axes.curiosity, episode.appraisal.curiosity * (nearEpisode ? 0.96 : 0.88)) : axes.curiosity,
+      connection: positiveEpisode ? Math.max(axes.connection, episode.appraisal.connection * (nearEpisode ? 0.98 : 0.9)) : axes.connection,
+      comfort: positiveEpisode ? Math.max(axes.comfort, episode.appraisal.comfort * (nearEpisode ? 0.98 : 0.9)) : axes.comfort,
+      mastery: positiveEpisode ? Math.max(axes.mastery, episode.appraisal.mastery * (nearEpisode ? 0.97 : 0.9)) : axes.mastery,
+      wonder: positiveEpisode ? Math.max(axes.wonder, episode.appraisal.wonder * (nearEpisode ? 0.98 : 0.88)) : axes.wonder
     }, 0.4),
     regulation: blendRegulation(episode.regulation, {
       ...regulation,
-      shock: clamp(regulation.shock + (nearEpisode ? 0.08 : 0))
+      shock: clamp(positiveEpisode ? Math.min(regulation.shock, episode.regulation.shock * 0.84) : regulation.shock + (nearEpisode ? 0.08 : 0)),
+      resolve: positiveEpisode ? Math.max(regulation.resolve, episode.regulation.resolve * 0.92) : regulation.resolve,
+      recovery: positiveEpisode ? Math.max(regulation.recovery, episode.regulation.recovery * 0.92) : regulation.recovery
     }, 0.4),
     updated_at: now
   };
   next.dominant_emotions = deriveDominantEmotions(next.appraisal, next.regulation);
   next.intensity = intensityFrom(next.appraisal, next.regulation);
-  next.resolved =
-    next.intensity < 0.3 &&
-    next.regulation.recovery >= 0.72 &&
-    next.regulation.shock <= 0.18 &&
-    perception.combat_state.hostilesNearby === 0;
+  next.resolved = positiveEpisode
+    ? (ageMs >= 1000 * 60 * 12 && next.intensity <= 0.62) ||
+      (ageMs >= 1000 * 60 * 24 && next.intensity <= 0.74) ||
+      (next.intensity < 0.36 && next.regulation.shock <= 0.12)
+    : next.intensity < 0.3 &&
+      next.regulation.recovery >= 0.72 &&
+      next.regulation.shock <= 0.18 &&
+      perception.combat_state.hostilesNearby === 0;
   return next.resolved ? undefined : next;
 }
 
@@ -667,6 +1111,7 @@ function updatePassiveTaggedPlaces(
   places: EmotionCoreState["tagged_places"],
   perception: PerceptionFrame,
   affect: AffectState,
+  bondedEntities: EmotionCoreState["bonded_entities"],
   now: string
 ): EmotionCoreState["tagged_places"] {
   let next = places
@@ -703,6 +1148,34 @@ function updatePassiveTaggedPlaces(
     });
   }
 
+  const strongestBond = bondedEntities
+    .filter((bond) => bond.attachment >= 0.58)
+    .sort((left, right) => right.attachment - left.attachment)[0];
+  if (strongestBond && perception.home_state.anchor) {
+    next = upsertTaggedPlace(next, {
+      kind: "bond_site",
+      label: strongestBond.label,
+      location: { ...perception.home_state.anchor },
+      salience: clamp(0.22 + strongestBond.attachment * 0.34),
+      cause_tags: [strongestBond.kind, strongestBond.label, "bonding"],
+      revisit_policy: "open",
+      updated_at: now
+    });
+  }
+
+  const babySpecies = firstNearbyBabySpecies(perception);
+  if (babySpecies && perception.home_state.anchor) {
+    next = upsertTaggedPlace(next, {
+      kind: "nursery_site",
+      label: `${babySpecies} nursery`,
+      location: { ...perception.home_state.anchor },
+      salience: 0.58,
+      cause_tags: ["birth", babySpecies, "care"],
+      revisit_policy: "open",
+      updated_at: now
+    });
+  }
+
   return trimTaggedPlaces(next);
 }
 
@@ -716,17 +1189,45 @@ function integrateEpisode(
   const active_episode = shouldPromote ? { ...episode, dominant_emotions: dominant } : core.active_episode;
   const axes = shouldPromote ? { ...episode.appraisal } : blendAxes(core.axes, episode.appraisal, 0.36);
   const regulation = shouldPromote ? { ...episode.regulation } : blendRegulation(core.regulation, episode.regulation, 0.36);
-  const tagged_places = episode.kind === "beauty" && episode.focal_location
-    ? upsertTaggedPlace(core.tagged_places, {
-        kind: "awe_site",
-        label: "beautiful place",
-        location: { ...episode.focal_location },
-        salience: clamp(0.28 + episode.appraisal.wonder * 0.3),
-        cause_tags: ["beauty", ...episode.cause_tags],
-        revisit_policy: "open",
-        updated_at: episode.updated_at
-      })
-    : core.tagged_places;
+  let tagged_places = core.tagged_places;
+  if (
+    (episode.kind === "beauty" ||
+      episode.kind === "wonder" ||
+      (episode.kind === "milestone" && episode.cause_tags.some((tag) => tag === "sunrise" || tag === "wonder"))) &&
+    episode.focal_location
+  ) {
+    tagged_places = upsertTaggedPlace(tagged_places, {
+      kind: "awe_site",
+      label: episode.subject_id_or_label ?? "beautiful place",
+      location: { ...episode.focal_location },
+      salience: clamp(0.28 + episode.appraisal.wonder * 0.3 + (episode.novelty ?? 0) * 0.1),
+      cause_tags: ["beauty", ...episode.cause_tags],
+      revisit_policy: "open",
+      updated_at: episode.updated_at
+    });
+  }
+  if (episode.kind === "attachment" && episode.focal_location) {
+    tagged_places = upsertTaggedPlace(tagged_places, {
+      kind: "bond_site",
+      label: episode.subject_id_or_label ?? "bonded place",
+      location: { ...episode.focal_location },
+      salience: clamp(0.28 + episode.appraisal.connection * 0.28),
+      cause_tags: ["bonding", ...episode.cause_tags],
+      revisit_policy: "open",
+      updated_at: episode.updated_at
+    });
+  }
+  if (episode.kind === "nurture" && episode.focal_location) {
+    tagged_places = upsertTaggedPlace(tagged_places, {
+      kind: "nursery_site",
+      label: episode.subject_id_or_label ?? "nursery",
+      location: { ...episode.focal_location },
+      salience: clamp(0.32 + episode.appraisal.connection * 0.24 + episode.appraisal.mastery * 0.16),
+      cause_tags: ["birth", ...episode.cause_tags],
+      revisit_policy: "open",
+      updated_at: episode.updated_at
+    });
+  }
 
   return {
     ...core,
@@ -749,6 +1250,171 @@ function episodeFromObservation(
   const importance = clamp(observation.importance);
   if (observation.tags.includes("death")) {
     return undefined;
+  }
+
+  if (observation.tags.includes("birth") || observation.tags.includes("nurture")) {
+    return buildEpisode(
+      "nurture",
+      observation.summary,
+      observation.timestamp,
+      observation.location,
+      observation.tags,
+      {
+        threat: 0.04,
+        loss: 0.02,
+        pain: 0.01,
+        curiosity: clamp(0.22 + importance * 0.12),
+        connection: clamp(0.58 + importance * 0.18),
+        comfort: clamp(0.3 + importance * 0.12),
+        mastery: clamp(0.44 + importance * 0.16),
+        wonder: clamp(0.28 + importance * 0.12)
+      },
+      {
+        arousal: 0.34,
+        shock: 0.01,
+        vigilance: 0.12,
+        resolve: 0.46,
+        recovery: 0.56
+      },
+      "open",
+      {
+        subject_kind: observation.tags.includes("pet") ? "pet" : "herd",
+        subject_id_or_label: observation.tags.find((tag) => !["birth", "nurture", "livestock", "pet", "care"].includes(tag)),
+        novelty: importance
+      }
+    );
+  }
+
+  if (observation.tags.includes("bonding") || observation.tags.includes("pet") || observation.tags.includes("reunion")) {
+    return buildEpisode(
+      "attachment",
+      observation.summary,
+      observation.timestamp,
+      observation.location,
+      observation.tags,
+      {
+        threat: 0.04,
+        loss: 0.02,
+        pain: 0.01,
+        curiosity: clamp(0.2 + importance * 0.12),
+        connection: clamp(0.68 + importance * 0.18),
+        comfort: clamp(0.34 + importance * 0.12),
+        mastery: 0.18,
+        wonder: 0.16
+      },
+      {
+        arousal: 0.3,
+        shock: 0.01,
+        vigilance: 0.08,
+        resolve: 0.3,
+        recovery: 0.58
+      },
+      "open",
+      {
+        subject_kind: observation.tags.includes("pet") ? "pet" : "player",
+        subject_id_or_label: observation.tags.find((tag) => !["bonding", "pet", "player", "meeting", "reunion", "social"].includes(tag)),
+        novelty: importance
+      }
+    );
+  }
+
+  if (observation.tags.includes("wonder") || observation.tags.includes("sunrise") || observation.tags.includes("sunset")) {
+    return buildEpisode(
+      "wonder",
+      observation.summary,
+      observation.timestamp,
+      observation.location,
+      observation.tags,
+      {
+        threat: 0.02,
+        loss: 0.01,
+        pain: 0.01,
+        curiosity: clamp(0.48 + importance * 0.16),
+        connection: 0.16,
+        comfort: clamp(0.3 + importance * 0.16),
+        mastery: 0.12,
+        wonder: clamp(0.76 + importance * 0.14)
+      },
+      {
+        arousal: 0.3,
+        shock: 0.01,
+        vigilance: 0.06,
+        resolve: 0.28,
+        recovery: 0.58
+      },
+      "open",
+      {
+        subject_kind: "moment",
+        subject_id_or_label: observation.tags.includes("sunrise") ? "sunrise" : observation.tags.includes("sunset") ? "sunset" : observation.summary,
+        novelty: importance
+      }
+    );
+  }
+
+  if (observation.tags.includes("play")) {
+    return buildEpisode(
+      "play",
+      observation.summary,
+      observation.timestamp,
+      observation.location,
+      observation.tags,
+      {
+        threat: 0.02,
+        loss: 0.01,
+        pain: 0.01,
+        curiosity: clamp(0.34 + importance * 0.14),
+        connection: clamp(0.44 + importance * 0.16),
+        comfort: clamp(0.34 + importance * 0.14),
+        mastery: 0.14,
+        wonder: 0.24
+      },
+      {
+        arousal: 0.34,
+        shock: 0.01,
+        vigilance: 0.04,
+        resolve: 0.24,
+        recovery: 0.58
+      },
+      "open",
+      {
+        subject_kind: observation.tags.includes("player") ? "player" : observation.tags.includes("pet") ? "pet" : "moment",
+        subject_id_or_label: observation.tags.find((tag) => !["play", "player", "pet", "social"].includes(tag)),
+        novelty: importance
+      }
+    );
+  }
+
+  if (observation.tags.includes("milestone") || observation.tags.includes("first")) {
+    return buildEpisode(
+      "milestone",
+      observation.summary,
+      observation.timestamp,
+      observation.location,
+      observation.tags,
+      {
+        threat: 0.02,
+        loss: 0.01,
+        pain: 0.01,
+        curiosity: 0.22,
+        connection: 0.24,
+        comfort: clamp(0.38 + importance * 0.14),
+        mastery: clamp(0.54 + importance * 0.14),
+        wonder: clamp(0.32 + importance * 0.14)
+      },
+      {
+        arousal: 0.32,
+        shock: 0.01,
+        vigilance: 0.06,
+        resolve: 0.42,
+        recovery: 0.54
+      },
+      "open",
+      {
+        subject_kind: observation.location ? "place" : "moment",
+        subject_id_or_label: observation.summary,
+        novelty: importance
+      }
+    );
   }
 
   if (observation.category === "danger" || observation.tags.includes("combat") || observation.tags.includes("boundary")) {
@@ -803,7 +1469,12 @@ function episodeFromObservation(
         resolve: 0.28,
         recovery: 0.52
       },
-      "open"
+      "open",
+      {
+        subject_kind: "place",
+        subject_id_or_label: observation.summary,
+        novelty: importance
+      }
     );
   }
 
@@ -831,7 +1502,12 @@ function episodeFromObservation(
         resolve: 0.28,
         recovery: 0.54
       },
-      "open"
+      "open",
+      {
+        subject_kind: "player",
+        subject_id_or_label: observation.tags.find((tag) => !["chat", "player", "nearby", "ambient", "social", "hospitality"].includes(tag)),
+        novelty: importance
+      }
     );
   }
 
@@ -924,6 +1600,72 @@ function episodeFromActionReport(report: ActionReport, core: EmotionCoreState): 
     );
   }
 
+  if (report.status === "completed" && report.intent_type === "socialize") {
+    return buildEpisode(
+      "play",
+      report.notes[0] ?? "A gentle social moment brightened the day.",
+      timestamp,
+      undefined,
+      ["play", "social", report.intent_type],
+      {
+        threat: 0.02,
+        loss: 0.01,
+        pain: 0.01,
+        curiosity: 0.28,
+        connection: clamp(0.58 + core.axes.connection * 0.18),
+        comfort: 0.44,
+        mastery: 0.14,
+        wonder: 0.22
+      },
+      {
+        arousal: 0.34,
+        shock: 0.01,
+        vigilance: 0.04,
+        resolve: 0.26,
+        recovery: 0.6
+      },
+      "open",
+      {
+        subject_kind: "player",
+        subject_id_or_label: firstCapitalizedWord(report.notes[0]),
+        novelty: 0.44
+      }
+    );
+  }
+
+  if (report.status === "completed" && report.intent_type === "tend_livestock") {
+    return buildEpisode(
+      report.notes.some((note) => /fed|bred|baby|newborn/i.test(note)) ? "nurture" : "achievement",
+      report.notes[0] ?? "Checking on the animals made the home feel more alive.",
+      timestamp,
+      undefined,
+      ["livestock", "care", report.intent_type, ...extractSpeciesTags(report.notes)],
+      {
+        threat: 0.03,
+        loss: 0.01,
+        pain: 0.01,
+        curiosity: 0.22,
+        connection: 0.48,
+        comfort: 0.42,
+        mastery: 0.56,
+        wonder: 0.18
+      },
+      {
+        arousal: 0.32,
+        shock: 0.01,
+        vigilance: 0.06,
+        resolve: 0.48,
+        recovery: 0.58
+      },
+      "open",
+      {
+        subject_kind: "herd",
+        subject_id_or_label: extractSpeciesTags(report.notes)[0],
+        novelty: 0.46
+      }
+    );
+  }
+
   if (report.status === "completed" && ["build", "craft", "repair", "farm", "tend_livestock"].includes(report.intent_type)) {
     return buildEpisode(
       "achievement",
@@ -991,7 +1733,8 @@ function buildEpisode(
   cause_tags: string[],
   appraisal: EmotionAppraisal,
   regulation: EmotionRegulation,
-  revisit_policy: EmotionEpisode["revisit_policy"]
+  revisit_policy: EmotionEpisode["revisit_policy"],
+  metadata: Partial<Pick<EmotionEpisode, "subject_kind" | "subject_id_or_label" | "novelty">> = {}
 ): EmotionEpisode {
   return {
     id: `${kind}:${timestamp}:${compact(cause_tags).join(":")}`,
@@ -1004,6 +1747,9 @@ function buildEpisode(
     cause_tags: compact(cause_tags),
     focal_location: location ? { ...location } : undefined,
     respawn_location: undefined,
+    subject_kind: metadata.subject_kind,
+    subject_id_or_label: metadata.subject_id_or_label,
+    novelty: metadata.novelty,
     inventory_loss: [],
     appraisal,
     regulation,
@@ -1030,8 +1776,20 @@ function deriveDominantEmotions(appraisal: EmotionAppraisal, regulation: Emotion
   if (appraisal.connection >= 0.62) {
     emotions.push("connected");
   }
+  if (appraisal.connection >= 0.56 && appraisal.comfort >= 0.46) {
+    emotions.push("tender");
+  }
   if (appraisal.wonder >= 0.68) {
     emotions.push("awed");
+  }
+  if (appraisal.wonder >= 0.52 && appraisal.curiosity >= 0.48 && regulation.vigilance < 0.28) {
+    emotions.push("curious");
+  }
+  if (appraisal.mastery >= 0.42 && appraisal.connection >= 0.5 && regulation.resolve >= 0.42) {
+    emotions.push("protective");
+  }
+  if (appraisal.connection >= 0.48 && appraisal.wonder >= 0.34 && regulation.shock < 0.12) {
+    emotions.push("playful");
   }
   if (appraisal.mastery >= 0.62 && regulation.resolve >= 0.48) {
     emotions.push("hopeful");
@@ -1184,8 +1942,615 @@ function isPreparedForRevisit(memory: MemoryState, frame: PerceptionFrame): bool
   );
 }
 
+function evolveBondedEntities(
+  bonds: EmotionCoreState["bonded_entities"],
+  perception: PerceptionFrame,
+  now: string
+): EmotionCoreState["bonded_entities"] {
+  let next = bonds.map((bond) => ({
+    ...bond,
+    familiarity: clamp(bond.familiarity * (bond.kind === "player" ? 0.998 : 0.999)),
+    attachment: clamp(bond.attachment * (bond.kind === "pet" ? 0.999 : 0.998))
+  }));
+
+  for (const entity of perception.nearby_entities.filter((entry) => entry.type === "player")) {
+    const previous = findBond(next, entity.name, "player");
+    next = upsertBondedEntity(next, {
+      id: previous?.id ?? `player:${entity.name.toLowerCase()}`,
+      kind: "player",
+      label: entity.name,
+      bond_kind: "familiar",
+      familiarity: clamp((previous?.familiarity ?? 0.22) + 0.14),
+      attachment: clamp((previous?.attachment ?? 0.14) + 0.1),
+      last_meaningful_contact_at: now,
+      home_affinity: previous?.home_affinity,
+      place_affinity_label: previous?.place_affinity_label
+    });
+  }
+
+  const babySpecies = firstNearbyBabySpecies(perception);
+  if (babySpecies) {
+    const previous = findBond(next, `${babySpecies} herd`, "herd") ?? findBond(next, babySpecies, "herd");
+    next = upsertBondedEntity(next, {
+      id: previous?.id ?? `herd:${babySpecies}`,
+      kind: "herd",
+      label: previous?.label ?? `${babySpecies} herd`,
+      bond_kind: "caretaking",
+      familiarity: clamp((previous?.familiarity ?? 0.24) + 0.12),
+      attachment: clamp((previous?.attachment ?? 0.18) + 0.1),
+      last_meaningful_contact_at: now,
+      home_affinity: previous?.home_affinity,
+      place_affinity_label: previous?.place_affinity_label
+    });
+  }
+
+  return trimBondedEntities(next);
+}
+
+function nearbyBondSignal(bonds: EmotionCoreState["bonded_entities"], perception: PerceptionFrame): number {
+  const nearbyPlayers = perception.nearby_entities.filter((entity) => entity.type === "player");
+  const playerSignal = nearbyPlayers.reduce((sum, entity) => {
+    const bond = findBond(bonds, entity.name, "player");
+    return sum + ((bond?.attachment ?? 0) * 0.55 + (bond?.familiarity ?? 0) * 0.25);
+  }, 0);
+  const herdSignal = firstNearbyBabySpecies(perception)
+    ? bonds
+        .filter((bond) => bond.kind === "herd")
+        .reduce((sum, bond) => sum + bond.attachment * 0.12, 0)
+    : 0;
+  return clamp(playerSignal + herdSignal);
+}
+
+function wonderMomentSignal(perception: PerceptionFrame, context: EmotionPerceptionContext): number {
+  const time = normalizedDayTime(perception.tick_time);
+  const dawnBand = time <= 1400 ? clamp((1400 - time) / 1400) : 0;
+  const scenicSupport = perception.notable_places.length > 0 || perception.terrain_affordances?.some((entry) => entry.type === "view" || entry.type === "water");
+  if (!scenicSupport || perception.weather !== "clear") {
+    return 0;
+  }
+  return clamp(
+    dawnBand * 0.62 +
+      clamp(perception.light_level / 15) * 0.18 +
+      (perception.combat_state.hostilesNearby === 0 ? 0.14 : 0) +
+      context.affect.wonder * 0.14
+  );
+}
+
+function nurtureMomentSignal(perception: PerceptionFrame): number {
+  const babyPresent = firstNearbyBabySpecies(perception) ? 0.42 : 0;
+  const welfarePressure = clamp(perception.livestock_state.welfareFlags.length * 0.12);
+  return clamp(babyPresent + welfarePressure);
+}
+
+function inferPerceptionLifeEpisode(
+  previous: EmotionCoreState,
+  current: EmotionCoreState,
+  perception: PerceptionFrame,
+  context: EmotionPerceptionContext,
+  now: string
+): { episode: EmotionEpisode; interrupt?: EmotionInterrupt } | undefined {
+  const candidates: Array<{ episode: EmotionEpisode; interrupt?: EmotionInterrupt; salience: number }> = [];
+  const softInterruptAllowed = canSoftInterrupt(current);
+
+  const nearbyPlayer = perception.nearby_entities.find((entity) => entity.type === "player");
+  if (nearbyPlayer) {
+    const previousBond = findBond(previous.bonded_entities, nearbyPlayer.name, "player");
+    const currentBond = findBond(current.bonded_entities, nearbyPlayer.name, "player");
+    const recentSocial = hasRecentEpisode(current.recent_episodes, ["attachment", "social"], nearbyPlayer.name, now, 1000 * 60 * 18);
+    const absenceMs = previousBond ? Math.max(0, Date.parse(now) - Date.parse(previousBond.last_meaningful_contact_at)) : Number.POSITIVE_INFINITY;
+    const firstMeeting = !previousBond && Boolean(currentBond);
+    const reunion = Boolean(previousBond) && absenceMs >= 1000 * 60 * 60 && !recentSocial;
+    if ((firstMeeting || reunion) && currentBond) {
+      const trigger = firstMeeting ? "social_contact" : "bonding";
+      const episode = buildEpisode(
+        "attachment",
+        firstMeeting ? `${nearbyPlayer.name} feels like someone new in my world.` : `${nearbyPlayer.name} is back, and that changes the feeling of this place.`,
+        now,
+        nearbyPlayer.position ?? perception.position,
+        compact([firstMeeting ? "meeting" : "reunion", "player", nearbyPlayer.name]),
+        {
+          threat: 0.03,
+          loss: 0.01,
+          pain: 0.01,
+          curiosity: clamp(0.24 + context.personality.traits.openness * 0.12),
+          connection: clamp(0.68 + currentBond.attachment * 0.18),
+          comfort: clamp(0.32 + currentBond.familiarity * 0.16),
+          mastery: 0.14,
+          wonder: clamp(0.18 + (firstMeeting ? 0.18 : 0.08))
+        },
+        {
+          arousal: 0.32,
+          shock: 0.01,
+          vigilance: 0.08,
+          resolve: 0.3,
+          recovery: 0.58
+        },
+        "open",
+        {
+          subject_kind: "player",
+          subject_id_or_label: nearbyPlayer.name,
+          novelty: firstMeeting ? 0.94 : 0.62
+        }
+      );
+      candidates.push({
+        episode,
+        interrupt: softInterruptAllowed
+          ? {
+              trigger,
+              reason: firstMeeting ? "Meeting someone new can justify a brief social turn when the world is safe." : "A meaningful reunion can justify a brief social turn when the world is safe.",
+              created_at: now,
+              episode_id: episode.id
+            }
+          : undefined,
+        salience: firstMeeting ? 0.82 : 0.66
+      });
+    }
+  }
+
+  const babySpecies = firstNearbyBabySpecies(perception);
+  if (babySpecies && !hasRecentEpisode(current.recent_episodes, ["nurture"], babySpecies, now, 1000 * 60 * 20)) {
+    const episode = buildEpisode(
+      "nurture",
+      `There is new ${babySpecies} life nearby, and it makes care feel more urgent.`,
+      now,
+      perception.home_state.anchor ?? perception.position,
+      compact(["birth", babySpecies, "nurture", "care"]),
+      {
+        threat: 0.04,
+        loss: 0.02,
+        pain: 0.01,
+        curiosity: 0.22,
+        connection: clamp(0.56 + context.personality.traits.agreeableness * 0.16),
+        comfort: 0.3,
+        mastery: 0.44,
+        wonder: 0.28
+      },
+      {
+        arousal: 0.36,
+        shock: 0.01,
+        vigilance: 0.14,
+        resolve: 0.44,
+        recovery: 0.56
+      },
+      "open",
+      {
+        subject_kind: "herd",
+        subject_id_or_label: babySpecies,
+        novelty: 0.82
+      }
+    );
+    candidates.push({
+      episode,
+      interrupt: softInterruptAllowed
+        ? {
+            trigger: "birth",
+            reason: "New life in the herd can briefly redirect the next step toward care.",
+            created_at: now,
+            episode_id: episode.id
+          }
+        : undefined,
+      salience: 0.78
+    });
+  }
+
+  const wonderSignal = wonderMomentSignal(perception, context);
+  const atHome = Boolean(perception.home_state.anchor && distanceBetween(perception.home_state.anchor, perception.position) <= 8);
+  const firstHomeSunrise = atHome && !hasEpisodeTag(current.recent_episodes, "first-home-sunrise");
+  if (wonderSignal >= 0.56 && !hasRecentEpisode(current.recent_episodes, ["wonder", "beauty", "milestone"], "sunrise", now, 1000 * 60 * 25)) {
+    const kind = firstHomeSunrise ? "milestone" : "wonder";
+    const cause_tags = compact(["sunrise", "wonder", firstHomeSunrise ? "first-home-sunrise" : undefined]);
+    const episode = buildEpisode(
+      kind,
+      firstHomeSunrise
+        ? "Sunrise over home made this place feel like something worth returning to."
+        : "The sunrise made the world feel newly alive for a moment.",
+      now,
+      perception.position,
+      cause_tags,
+      {
+        threat: 0.02,
+        loss: 0.01,
+        pain: 0.01,
+        curiosity: clamp(0.46 + wonderSignal * 0.14),
+        connection: atHome ? 0.24 : 0.14,
+        comfort: atHome ? 0.38 : 0.24,
+        mastery: firstHomeSunrise ? 0.44 : 0.14,
+        wonder: clamp(0.72 + wonderSignal * 0.18)
+      },
+      {
+        arousal: 0.32,
+        shock: 0.01,
+        vigilance: 0.04,
+        resolve: firstHomeSunrise ? 0.42 : 0.28,
+        recovery: 0.62
+      },
+      "open",
+      {
+        subject_kind: firstHomeSunrise ? "place" : "moment",
+        subject_id_or_label: firstHomeSunrise ? "home sunrise" : "sunrise",
+        novelty: firstHomeSunrise ? 0.9 : 0.74
+      }
+    );
+    candidates.push({
+      episode,
+      interrupt: softInterruptAllowed
+        ? {
+            trigger: "wonder",
+            reason: "A strong wonder moment can justify a short pause when survival is stable.",
+            created_at: now,
+            episode_id: episode.id
+          }
+        : undefined,
+      salience: firstHomeSunrise ? 0.8 : 0.7
+    });
+  }
+
+  const best = candidates.sort((left, right) => right.salience - left.salience)[0];
+  return best ? { episode: best.episode, interrupt: best.interrupt } : undefined;
+}
+
+function updateBondedEntitiesFromActionReport(
+  bonds: EmotionCoreState["bonded_entities"],
+  report: ActionReport
+): EmotionCoreState["bonded_entities"] {
+  let next = [...bonds];
+  if (report.status === "completed" && report.intent_type === "tend_livestock") {
+    for (const species of extractSpeciesTags(report.notes)) {
+      const previous = findBond(next, `${species} herd`, "herd") ?? findBond(next, species, "herd");
+      next = upsertBondedEntity(next, {
+        id: previous?.id ?? `herd:${species}`,
+        kind: "herd",
+        label: previous?.label ?? `${species} herd`,
+        bond_kind: "caretaking",
+        familiarity: clamp((previous?.familiarity ?? 0.24) + 0.1),
+        attachment: clamp((previous?.attachment ?? 0.18) + 0.08),
+        last_meaningful_contact_at: new Date().toISOString(),
+        home_affinity: previous?.home_affinity,
+        place_affinity_label: previous?.place_affinity_label
+      });
+    }
+  }
+  return trimBondedEntities(next);
+}
+
+function canSoftInterrupt(
+  core: EmotionCoreState,
+  personality?: ResidentPersonalityProfile
+): boolean {
+  return (
+    core.axes.threat <= 0.34 &&
+    core.regulation.shock <= 0.2 &&
+    core.regulation.vigilance <= 0.46 &&
+    (personality?.traits.threat_sensitivity ?? 0.5) <= 0.88
+  );
+}
+
+function trimBondedEntities(bonds: EmotionCoreState["bonded_entities"]): EmotionCoreState["bonded_entities"] {
+  return bonds
+    .map((bond) => ({ ...bond }))
+    .sort((left, right) => left.attachment + left.familiarity - (right.attachment + right.familiarity))
+    .slice(-MAX_BONDED_ENTITIES);
+}
+
+function upsertBondedEntity(
+  bonds: EmotionCoreState["bonded_entities"],
+  bond: BondedEntity
+): EmotionCoreState["bonded_entities"] {
+  const next = bonds.filter((entry) => entry.id !== bond.id);
+  next.push({ ...bond });
+  return trimBondedEntities(next);
+}
+
+function mergeBondFromReflection(
+  bonds: EmotionCoreState["bonded_entities"],
+  reflection: DayLifeReflectionResult,
+  context: DayLifeReflectionApplyContext
+): BondedEntity {
+  const bond = reflection.bond!;
+  const id = `${bond.kind}:${bond.label.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  const previous = bonds.find((entry) => entry.id === id || (entry.kind === bond.kind && entry.label.toLowerCase() === bond.label.toLowerCase()));
+  return {
+    id,
+    kind: bond.kind,
+    label: bond.label,
+    bond_kind: bond.bond_kind,
+    familiarity: clamp((previous?.familiarity ?? 0.24) + bond.delta_familiarity),
+    attachment: clamp((previous?.attachment ?? 0.2) + bond.delta_attachment),
+    last_meaningful_contact_at: context.timestamp,
+    home_affinity: bond.home_affinity ?? previous?.home_affinity,
+    place_affinity_label: reflection.place?.label ?? previous?.place_affinity_label
+  };
+}
+
+function findMatchingReflectionEpisode(
+  core: EmotionCoreState,
+  reflection: DayLifeReflectionResult,
+  focalLocation: Vec3
+): EmotionEpisode | undefined {
+  const active = core.active_episode;
+  if (!active || active.kind !== reflection.event_kind || active.resolved) {
+    return undefined;
+  }
+  if (reflection.subject?.label && active.subject_id_or_label?.toLowerCase() === reflection.subject.label.toLowerCase()) {
+    return active;
+  }
+  if (reflection.bond?.label && active.subject_id_or_label?.toLowerCase() === reflection.bond.label.toLowerCase()) {
+    return active;
+  }
+  if (active.focal_location && distanceBetween(active.focal_location, focalLocation) <= 6) {
+    return active;
+  }
+  return undefined;
+}
+
+function defaultAppraisalForReflection(kind: EmotionEpisode["kind"]): EmotionAppraisal {
+  switch (kind) {
+    case "death":
+      return { threat: 0.88, loss: 0.56, pain: 0.9, curiosity: 0.08, connection: 0.16, comfort: 0.06, mastery: 0.22, wonder: 0.02 };
+    case "damage":
+    case "combat":
+      return { threat: 0.72, loss: 0.22, pain: 0.52, curiosity: 0.12, connection: 0.12, comfort: 0.1, mastery: 0.24, wonder: 0.02 };
+    case "loss":
+      return { threat: 0.42, loss: 0.62, pain: 0.26, curiosity: 0.12, connection: 0.2, comfort: 0.12, mastery: 0.2, wonder: 0.04 };
+    case "social":
+    case "attachment":
+      return { threat: 0.04, loss: 0.02, pain: 0.01, curiosity: 0.24, connection: 0.72, comfort: 0.42, mastery: 0.2, wonder: 0.18 };
+    case "nurture":
+      return { threat: 0.04, loss: 0.02, pain: 0.01, curiosity: 0.24, connection: 0.6, comfort: 0.36, mastery: 0.44, wonder: 0.28 };
+    case "wonder":
+    case "beauty":
+      return { threat: 0.04, loss: 0.02, pain: 0.01, curiosity: 0.48, connection: 0.2, comfort: 0.34, mastery: 0.18, wonder: 0.74 };
+    case "play":
+      return { threat: 0.02, loss: 0.02, pain: 0.01, curiosity: 0.38, connection: 0.44, comfort: 0.32, mastery: 0.18, wonder: 0.28 };
+    case "milestone":
+    case "achievement":
+      return { threat: 0.04, loss: 0.02, pain: 0.01, curiosity: 0.28, connection: 0.3, comfort: 0.38, mastery: 0.64, wonder: 0.26 };
+    case "safety":
+      return { threat: 0.12, loss: 0.04, pain: 0.06, curiosity: 0.14, connection: 0.22, comfort: 0.58, mastery: 0.32, wonder: 0.08 };
+  }
+}
+
+function defaultRegulationForReflection(kind: EmotionEpisode["kind"]): EmotionRegulation {
+  switch (kind) {
+    case "death":
+      return { arousal: 0.94, shock: 0.96, vigilance: 0.84, resolve: 0.24, recovery: 0.12 };
+    case "damage":
+    case "combat":
+      return { arousal: 0.76, shock: 0.4, vigilance: 0.72, resolve: 0.32, recovery: 0.18 };
+    case "loss":
+      return { arousal: 0.46, shock: 0.28, vigilance: 0.4, resolve: 0.28, recovery: 0.26 };
+    case "social":
+    case "attachment":
+      return { arousal: 0.28, shock: 0.02, vigilance: 0.08, resolve: 0.32, recovery: 0.56 };
+    case "nurture":
+      return { arousal: 0.34, shock: 0.02, vigilance: 0.16, resolve: 0.46, recovery: 0.54 };
+    case "wonder":
+    case "beauty":
+      return { arousal: 0.36, shock: 0.04, vigilance: 0.1, resolve: 0.24, recovery: 0.48 };
+    case "play":
+      return { arousal: 0.34, shock: 0.02, vigilance: 0.06, resolve: 0.22, recovery: 0.5 };
+    case "milestone":
+    case "achievement":
+      return { arousal: 0.4, shock: 0.04, vigilance: 0.1, resolve: 0.54, recovery: 0.42 };
+    case "safety":
+      return { arousal: 0.18, shock: 0.02, vigilance: 0.12, resolve: 0.34, recovery: 0.66 };
+  }
+}
+
+function applyAppraisalPatch(base: EmotionAppraisal, patch: Partial<EmotionAppraisal>): EmotionAppraisal {
+  return {
+    threat: patch.threat ?? base.threat,
+    loss: patch.loss ?? base.loss,
+    pain: patch.pain ?? base.pain,
+    curiosity: patch.curiosity ?? base.curiosity,
+    connection: patch.connection ?? base.connection,
+    comfort: patch.comfort ?? base.comfort,
+    mastery: patch.mastery ?? base.mastery,
+    wonder: patch.wonder ?? base.wonder
+  };
+}
+
+function applyRegulationPatch(base: EmotionRegulation, patch: Partial<EmotionRegulation>): EmotionRegulation {
+  return {
+    arousal: patch.arousal ?? base.arousal,
+    shock: patch.shock ?? base.shock,
+    vigilance: patch.vigilance ?? base.vigilance,
+    resolve: patch.resolve ?? base.resolve,
+    recovery: patch.recovery ?? base.recovery
+  };
+}
+
+function revisitPolicyForReflection(
+  kind: EmotionEpisode["kind"],
+  appraisal: Partial<EmotionAppraisal>,
+  explicit?: EmotionEpisode["revisit_policy"]
+): EmotionEpisode["revisit_policy"] {
+  if (explicit) {
+    return explicit;
+  }
+  if (kind === "death" || kind === "damage" || kind === "combat" || kind === "loss") {
+    return (appraisal.threat ?? 0) > 0.68 ? "avoid" : "cautious";
+  }
+  return "open";
+}
+
+function isHardInterrupt(trigger: EmotionInterrupt["trigger"]): boolean {
+  return trigger === "death" || trigger === "respawn";
+}
+
+function chooseStrongerInterrupt(
+  current: EmotionInterrupt | undefined,
+  candidate: EmotionInterrupt
+): EmotionInterrupt {
+  if (!current) {
+    return candidate;
+  }
+  const currentPriority = interruptPriority(current.trigger);
+  const candidatePriority = interruptPriority(candidate.trigger);
+  if (candidatePriority > currentPriority) {
+    return candidate;
+  }
+  if (candidatePriority < currentPriority) {
+    return current;
+  }
+  return candidate;
+}
+
+function interruptPriority(trigger: EmotionInterrupt["trigger"]): number {
+  switch (trigger) {
+    case "death":
+      return 4;
+    case "respawn":
+      return 3;
+    case "birth":
+      return 2;
+    case "social_contact":
+    case "bonding":
+    case "wonder":
+      return 1;
+  }
+}
+
+function mergeDominantEmotions(primary: string[], fallback: string[]): string[] {
+  return [...new Set([...primary, ...fallback].map((entry) => entry.trim()).filter(Boolean))].slice(0, 4);
+}
+
+function findBond(
+  bonds: EmotionCoreState["bonded_entities"],
+  label: string,
+  kind?: BondedEntity["kind"]
+): BondedEntity | undefined {
+  const target = label.trim().toLowerCase();
+  return bonds.find((bond) => bond.label.trim().toLowerCase() === target && (!kind || bond.kind === kind));
+}
+
+function countNearbyBondedEntities(
+  bonds: EmotionCoreState["bonded_entities"],
+  frame: PerceptionFrame,
+  kind: BondedEntity["kind"]
+): number {
+  if (kind === "player") {
+    return frame.nearby_entities.filter((entity) => entity.type === "player" && findBond(bonds, entity.name, "player")).length;
+  }
+  if (kind === "herd") {
+    const species = firstNearbyBabySpecies(frame);
+    return species && findBond(bonds, `${species} herd`, "herd") ? 1 : 0;
+  }
+  return 0;
+}
+
+function firstNearbyBabySpecies(perception: PerceptionFrame): string | undefined {
+  const baby = perception.nearby_entities.find((entity) => entity.type === "passive" && entity.isBaby);
+  return baby ? speciesFromEntityName(baby.name) : undefined;
+}
+
+function speciesFromEntityName(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.includes("chicken")) {
+    return "chicken";
+  }
+  if (lower.includes("sheep")) {
+    return "sheep";
+  }
+  if (lower.includes("cow")) {
+    return "cow";
+  }
+  if (lower.includes("pig")) {
+    return "pig";
+  }
+  if (lower.includes("wolf") || lower.includes("dog")) {
+    return "wolf";
+  }
+  if (lower.includes("cat")) {
+    return "cat";
+  }
+  return lower.replace(/\s+/g, "_");
+}
+
+function extractSpeciesTags(notes: string[]): string[] {
+  const species = new Set<string>();
+  for (const note of notes) {
+    for (const candidate of ["chicken", "sheep", "cow", "pig", "wolf", "cat"]) {
+      if (note.toLowerCase().includes(candidate)) {
+        species.add(candidate);
+      }
+    }
+  }
+  return [...species];
+}
+
+function firstCapitalizedWord(note: string | undefined): string | undefined {
+  if (!note) {
+    return undefined;
+  }
+  return note
+    .split(/\s+/)
+    .find((word) => /^[A-Z][a-z]/.test(word))
+    ?.replace(/[^A-Za-z]/g, "");
+}
+
+function comfortAtLocation(
+  places: EmotionCoreState["tagged_places"],
+  location: Vec3
+): number | undefined {
+  const comfortSite = places
+    .filter((place) => place.kind === "comfort_site")
+    .sort((left, right) => distanceBetween(left.location, location) - distanceBetween(right.location, location))[0];
+  if (!comfortSite) {
+    return undefined;
+  }
+  return clamp(1 - Math.min(1, distanceBetween(comfortSite.location, location) / 24));
+}
+
+function hasRecentEpisode(
+  episodes: EmotionEpisode[],
+  kinds: EmotionEpisode["kind"][],
+  subjectHint: string | undefined,
+  now: string,
+  windowMs: number
+): boolean {
+  const nowMs = Date.parse(now);
+  return episodes.some((episode) => {
+    if (!kinds.includes(episode.kind)) {
+      return false;
+    }
+    if (nowMs - Date.parse(episode.updated_at) > windowMs) {
+      return false;
+    }
+    if (!subjectHint) {
+      return true;
+    }
+    const hint = subjectHint.toLowerCase();
+    return (
+      episode.subject_id_or_label?.toLowerCase().includes(hint) ||
+      episode.summary.toLowerCase().includes(hint) ||
+      episode.cause_tags.some((tag) => tag.toLowerCase().includes(hint))
+    );
+  });
+}
+
+function hasEpisodeTag(episodes: EmotionEpisode[], tag: string): boolean {
+  const target = tag.toLowerCase();
+  return episodes.some((episode) => episode.cause_tags.some((cause) => cause.toLowerCase() === target));
+}
+
+function normalizedDayTime(tickTime: number): number {
+  const time = tickTime % 24000;
+  return time < 0 ? time + 24000 : time;
+}
+
 function intensityFrom(appraisal: EmotionAppraisal, regulation: EmotionRegulation): number {
-  return clamp((appraisal.threat + appraisal.loss + appraisal.pain + regulation.shock + regulation.arousal) / 5);
+  const threatSalience = (appraisal.threat + appraisal.loss + appraisal.pain + regulation.shock + regulation.arousal) / 5;
+  const lifeSalience =
+    (appraisal.curiosity +
+      appraisal.connection +
+      appraisal.comfort +
+      appraisal.mastery +
+      appraisal.wonder +
+      regulation.resolve +
+      regulation.recovery) /
+    7;
+  return clamp(Math.max(threatSalience, lifeSalience * 0.9));
 }
 
 function distanceBetween(left: Vec3, right: Vec3): number {
@@ -1229,6 +2594,7 @@ function cloneEmotionCore(core: EmotionCoreState): EmotionCoreState {
       location: { ...place.location },
       cause_tags: [...place.cause_tags]
     })),
+    bonded_entities: core.bonded_entities.map((bond) => ({ ...bond })),
     pending_interrupt: core.pending_interrupt ? { ...core.pending_interrupt } : undefined
   };
 }

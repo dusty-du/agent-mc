@@ -2,10 +2,14 @@ package io.agentmc.resident;
 
 import io.papermc.paper.event.player.AsyncChatEvent;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import org.bukkit.entity.AnimalTamer;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityBreedEvent;
+import org.bukkit.event.entity.EntityTameEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerBedEnterEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
@@ -52,6 +56,38 @@ public final class ResidentBrainBridgeListener implements Listener {
         brainClient.postResidentRespawn(event);
     }
 
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
+    public void onEntityTame(EntityTameEvent event) {
+        Player resident = plugin.residentPlayer();
+        if (resident == null || !resident.isOnline()) {
+            return;
+        }
+
+        AnimalTamer owner = event.getOwner();
+        boolean residentOwned = owner instanceof Player ownerPlayer && plugin.isResidentPlayer(ownerPlayer);
+        if (!residentOwned && !isNearResident(event.getEntity(), resident, 24.0D)) {
+            return;
+        }
+
+        brainClient.postAnimalBond(resident, event.getEntity(), residentOwned ? "tamed" : "observed_tame", "companion");
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
+    public void onEntityBreed(EntityBreedEvent event) {
+        Player resident = plugin.residentPlayer();
+        if (resident == null || !resident.isOnline()) {
+            return;
+        }
+
+        boolean residentBreeder = event.getBreeder() instanceof Player breederPlayer && plugin.isResidentPlayer(breederPlayer);
+        if (!residentBreeder && !isNearResident(event.getEntity(), resident, 24.0D)) {
+            return;
+        }
+
+        String breederName = event.getBreeder() instanceof Player breederPlayer ? breederPlayer.getName() : null;
+        brainClient.postAnimalBirth(resident, event.getEntity(), breederName);
+    }
+
     @EventHandler(ignoreCancelled = true)
     public void onPlayerChat(AsyncChatEvent event) {
         String message = PlainTextComponentSerializer.plainText().serialize(event.message()).trim();
@@ -93,5 +129,17 @@ public final class ResidentBrainBridgeListener implements Listener {
 
         double radius = Math.max(1.0D, plugin.getConfig().getDouble("brain.player-chat-radius", DEFAULT_CHAT_RADIUS));
         return speaker.getLocation().distanceSquared(resident.getLocation()) <= radius * radius;
+    }
+
+    private boolean isNearResident(LivingEntity entity, Player resident, double radius) {
+        if (resident == null || !resident.isOnline()) {
+            return false;
+        }
+
+        if (entity == null || !entity.isValid() || !entity.getWorld().equals(resident.getWorld())) {
+            return false;
+        }
+
+        return entity.getLocation().distanceSquared(resident.getLocation()) <= radius * radius;
     }
 }

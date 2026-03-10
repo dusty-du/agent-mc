@@ -14,8 +14,10 @@ const memoryRecall = vi.fn();
 const memoryPendingSleepWork = vi.fn();
 const sleepLatestOvernight = vi.fn();
 const sleepCurrentValues = vi.fn();
+const sleepReflectDayEvent = vi.fn();
 const createServer = vi.fn(() => ({ close: vi.fn() }));
-const createSleepConsolidatorFromEnv = vi.fn(() => ({ modelName: "sleep-test", synthesize: vi.fn() }));
+const createReflectiveConsolidatorFromEnv = vi.fn(() => ({ modelName: "sleep-test", synthesize: vi.fn(), reflectDay: vi.fn() }));
+const rememberDayLifeReflection = vi.fn((memory: MemoryState) => memory);
 const memoryCtorArgs: unknown[][] = [];
 const sleepCtorArgs: unknown[][] = [];
 const fetchMock = vi.fn();
@@ -57,6 +59,7 @@ vi.mock("@resident/brain", () => {
     currentValues = sleepCurrentValues;
     consolidate = vi.fn();
     ingestCultureSignal = vi.fn();
+    reflectDayEvent = sleepReflectDayEvent;
   }
 
   class ResidentExecutive {
@@ -67,11 +70,12 @@ vi.mock("@resident/brain", () => {
 
   return {
     createOpenAIExecutivePlannerFromEnv: vi.fn(),
-    createOpenAISleepConsolidatorFromEnv: createSleepConsolidatorFromEnv,
+    createOpenAIReflectiveConsolidatorFromEnv: createReflectiveConsolidatorFromEnv,
     createResidentBrainServer: createServer,
     FileBackedMemoryStore,
     FileBackedSleepStore,
     MemoryManager,
+    rememberDayLifeReflection,
     ResidentExecutive,
     SleepCore
   };
@@ -108,12 +112,17 @@ describe("ResidentAgentRunner", () => {
     memoryPendingSleepWork.mockReset();
     sleepLatestOvernight.mockReset();
     sleepCurrentValues.mockReset();
+    sleepReflectDayEvent.mockReset();
+    rememberDayLifeReflection.mockClear();
     createServer.mockClear();
-    createSleepConsolidatorFromEnv.mockClear();
+    createReflectiveConsolidatorFromEnv.mockClear();
     fetchMock.mockReset();
     vi.stubGlobal("fetch", fetchMock);
     memoryCtorArgs.length = 0;
     sleepCtorArgs.length = 0;
+    sleepReflectDayEvent.mockImplementation(async (input?: { trigger?: string }) =>
+      createDayReflectionRecord((input?.trigger as Parameters<typeof createDayReflectionRecord>[0]) ?? "wonder")
+    );
   });
 
   afterEach(() => {
@@ -199,7 +208,7 @@ describe("ResidentAgentRunner", () => {
     await runner.run();
 
     expect(memoryCtorArgs[0]?.[1]).toBe(sleepCtorArgs[0]?.[0]);
-    expect(sleepCtorArgs[0]?.[1]).toBe(createSleepConsolidatorFromEnv.mock.results[0]?.value);
+    expect(sleepCtorArgs[0]?.[1]).toBe(createReflectiveConsolidatorFromEnv.mock.results[0]?.value);
     expect(memoryRememberActionSnapshot).toHaveBeenCalledOnce();
     expect(memoryRecall).toHaveBeenCalledOnce();
     expect(memoryRecall).toHaveBeenCalledWith({
@@ -407,6 +416,217 @@ describe("ResidentAgentRunner", () => {
         })
       })
     );
+  });
+
+  it("also clears soft life-core interrupts after they are consumed", async () => {
+    const { ResidentAgentRunner } = await import("../src/agent-runner");
+    const baseMemory = createMemory();
+    const interruptedMemory: MemoryState = {
+      ...baseMemory,
+      emotion_core: {
+        ...baseMemory.emotion_core,
+        pending_interrupt: {
+          trigger: "wonder",
+          reason: "Sunrise deserves a pause.",
+          created_at: "2026-03-10T05:10:00.000Z"
+        }
+      }
+    };
+    const perception = createPerception();
+    let runner: InstanceType<typeof ResidentAgentRunner> | undefined;
+
+    driverConnect.mockResolvedValue(undefined);
+    sleepLatestOvernight.mockResolvedValue(undefined);
+    sleepCurrentValues.mockResolvedValue(DEFAULT_VALUE_PROFILE);
+    memorySyncPerception.mockResolvedValue(interruptedMemory);
+    memoryPendingSleepWork.mockResolvedValue([]);
+    memoryCurrent.mockResolvedValue(interruptedMemory);
+    memoryReplace.mockResolvedValue(interruptedMemory);
+    memoryRemember.mockResolvedValue(interruptedMemory);
+    memoryRememberReport.mockResolvedValue(interruptedMemory);
+    memoryRememberActionSnapshot.mockResolvedValue(interruptedMemory);
+    executiveDecide.mockResolvedValue({
+      intent: {
+        agent_id: "resident-1",
+        intent_type: "observe",
+        reason: "honor the sunrise",
+        priority: 1,
+        cancel_conditions: [],
+        success_conditions: [],
+        dialogue: "I want to really see this before I move on.",
+        trigger: "wonder"
+      },
+      memory: interruptedMemory,
+      observations: [],
+      replanLevel: "soft"
+    });
+    runtimeTick
+      .mockResolvedValueOnce({ perception })
+      .mockImplementationOnce(async () => {
+        runner?.stop();
+        return {
+          perception,
+          report: {
+            intent_type: "observe",
+            status: "completed",
+            notes: [],
+            damage_taken: 0,
+            inventory_delta: {},
+            world_delta: [],
+            needs_replan: false
+          }
+        };
+      });
+
+    runner = new ResidentAgentRunner({
+      host: "127.0.0.1",
+      port: 25565,
+      username: "resident-1",
+      auth: "offline",
+      serveBrain: false,
+      intervalMs: 0
+    });
+
+    await runner.run();
+
+    expect(executiveDecide.mock.calls[0]?.[4]).toBe("wonder");
+    expect(memoryReplace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        emotion_core: expect.objectContaining({
+          pending_interrupt: undefined
+        })
+      })
+    );
+  });
+
+  it("queues daytime reflective follow-up without blocking the finished turn", async () => {
+    const { ResidentAgentRunner } = await import("../src/agent-runner");
+    const baseMemory = createMemory();
+    const reflectiveMemory: MemoryState = {
+      ...baseMemory,
+      emotion_core: {
+        ...baseMemory.emotion_core,
+        pending_interrupt: {
+          trigger: "wonder",
+          reason: "The sunrise is worth carrying forward.",
+          created_at: "2026-03-10T06:00:00.000Z"
+        }
+      }
+    };
+    const perception = {
+      ...createPerception(),
+      tick_time: 1200,
+      notable_places: ["sunrise ridge"],
+      terrain_affordances: [
+        {
+          type: "view" as const,
+          location: { x: 2, y: 64, z: 2 },
+          note: "clear horizon"
+        }
+      ]
+    };
+    let runner: InstanceType<typeof ResidentAgentRunner> | undefined;
+    let resolveReflection: ((value: unknown) => void) | undefined;
+
+    driverConnect.mockResolvedValue(undefined);
+    sleepLatestOvernight.mockResolvedValue(undefined);
+    sleepCurrentValues.mockResolvedValue(DEFAULT_VALUE_PROFILE);
+    memorySyncPerception.mockResolvedValue(reflectiveMemory);
+    memoryPendingSleepWork.mockResolvedValue([]);
+    memoryCurrent.mockResolvedValue(reflectiveMemory);
+    memoryReplace.mockResolvedValue(reflectiveMemory);
+    memoryRemember.mockResolvedValue(reflectiveMemory);
+    memoryRememberReport.mockResolvedValue(reflectiveMemory);
+    memoryRememberActionSnapshot.mockResolvedValue(reflectiveMemory);
+    sleepReflectDayEvent.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveReflection = resolve;
+        })
+    );
+    executiveDecide.mockResolvedValue({
+      intent: {
+        agent_id: "resident-1",
+        intent_type: "observe",
+        reason: "honor the sunrise",
+        priority: 1,
+        cancel_conditions: [],
+        success_conditions: [],
+        dialogue: "I want one still moment with this before I move on.",
+        trigger: "wonder"
+      },
+      memory: reflectiveMemory,
+      observations: [],
+      replanLevel: "soft"
+    });
+    runtimeTick
+      .mockResolvedValueOnce({ perception })
+      .mockImplementationOnce(async () => {
+        runner?.stop();
+        return {
+          perception,
+          report: {
+            intent_type: "observe",
+            status: "completed",
+            notes: [],
+            damage_taken: 0,
+            inventory_delta: {},
+            world_delta: [],
+            needs_replan: false
+          }
+        };
+      });
+
+    runner = new ResidentAgentRunner({
+      host: "127.0.0.1",
+      port: 25565,
+      username: "resident-1",
+      auth: "offline",
+      serveBrain: false,
+      intervalMs: 0
+    });
+
+    await runner.run();
+
+    expect(sleepReflectDayEvent).toHaveBeenCalledOnce();
+    expect(sleepReflectDayEvent.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        trigger: "wonder"
+      })
+    );
+
+    resolveReflection?.({
+      id: "day-reflection:1",
+      day_number: 1,
+      created_at: "2026-03-10T06:00:02.000Z",
+      trigger: "wonder",
+      fingerprint: "wonder|sunrise-ridge|none|0:8:0",
+      summary: "The sunrise over home felt worth carrying forward.",
+      result: {
+        summary: "The sunrise over home felt worth carrying forward.",
+        event_kind: "wonder",
+        salience: 0.74,
+        dominant_emotions: ["awed"],
+        appraisal: {
+          curiosity: 0.58,
+          wonder: 0.82,
+          comfort: 0.42
+        },
+        regulation: {
+          arousal: 0.34,
+          recovery: 0.48
+        },
+        observation: {
+          category: "beauty",
+          summary: "The sunrise over home steadied something in him.",
+          tags: ["wonder", "sunrise", "home"],
+          importance: 0.74
+        }
+      }
+    });
+    await vi.waitFor(() => {
+      expect(rememberDayLifeReflection).toHaveBeenCalled();
+    });
   });
 
   it("publishes the current intent dialogue through the presentation source shared with the brain server", async () => {
@@ -677,11 +897,70 @@ function createMemory(): MemoryState {
       },
       dominant_emotions: ["steady"],
       recent_episodes: [],
-      tagged_places: []
+      tagged_places: [],
+      bonded_entities: []
     },
     self_narrative: ["I am here to live well."],
     carry_over_commitments: [],
     last_updated_at: "2026-03-09T11:00:00.000Z"
+  };
+}
+
+function createDayReflectionRecord(trigger: "wonder" | "respawn" | "death" | "birth" | "bonding" | "social_contact" = "wonder") {
+  return {
+    id: `day-reflection:${trigger}`,
+    day_number: 1,
+    created_at: "2026-03-10T06:00:02.000Z",
+    trigger,
+    fingerprint: `${trigger}|sunrise-ridge|none|0:8:0`,
+    summary: "The sunrise over home felt worth carrying forward.",
+    result: {
+      summary: "The sunrise over home felt worth carrying forward.",
+      event_kind: trigger === "death" ? "death" : trigger === "respawn" ? "safety" : trigger === "birth" ? "nurture" : "wonder",
+      salience: 0.74,
+      dominant_emotions: trigger === "death" ? ["shaken"] : ["awed"],
+      appraisal:
+        trigger === "death"
+          ? {
+              threat: 0.82,
+              loss: 0.44,
+              pain: 0.86
+            }
+          : {
+              curiosity: 0.58,
+              wonder: 0.82,
+              comfort: 0.42
+            },
+      regulation:
+        trigger === "death"
+          ? {
+              arousal: 0.88,
+              shock: 0.92,
+              vigilance: 0.76
+            }
+          : {
+              arousal: 0.34,
+              recovery: 0.48
+            },
+      interrupt:
+        trigger === "respawn"
+          ? {
+              trigger: "respawn" as const,
+              reason: "A fresh look is warranted."
+            }
+          : trigger === "death"
+            ? {
+                trigger: "death" as const,
+                reason: "Danger still frames the next move."
+              }
+            : undefined,
+      observation: {
+        category: "beauty" as const,
+        summary: "The sunrise over home steadied something in him.",
+        tags: ["wonder", "sunrise", "home"],
+        importance: 0.74
+      }
+    }
   };
 }
 
