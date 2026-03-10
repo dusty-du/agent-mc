@@ -18,6 +18,7 @@ const createServer = vi.fn(() => ({ close: vi.fn() }));
 const createSleepConsolidatorFromEnv = vi.fn(() => ({ modelName: "sleep-test", synthesize: vi.fn() }));
 const memoryCtorArgs: unknown[][] = [];
 const sleepCtorArgs: unknown[][] = [];
+const fetchMock = vi.fn();
 
 vi.mock("@resident/brain", () => {
   class FileBackedMemoryStore {
@@ -109,12 +110,15 @@ describe("ResidentAgentRunner", () => {
     sleepCurrentValues.mockReset();
     createServer.mockClear();
     createSleepConsolidatorFromEnv.mockClear();
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
     memoryCtorArgs.length = 0;
     sleepCtorArgs.length = 0;
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("uses memory.recall for daytime recall and shares the sleep archive with memory", async () => {
@@ -324,6 +328,87 @@ describe("ResidentAgentRunner", () => {
     expect(executiveDecide.mock.calls[1]?.[4]).toBe("task_failure");
   });
 
+  it("prefers pending emotion interrupts over the generic runner trigger and clears them after planning", async () => {
+    const { ResidentAgentRunner } = await import("../src/agent-runner");
+    const baseMemory = createMemory();
+    const interruptedMemory: MemoryState = {
+      ...baseMemory,
+      emotion_core: {
+        ...baseMemory.emotion_core,
+        pending_interrupt: {
+          trigger: "respawn",
+          reason: "Respawning should interrupt routine.",
+          created_at: "2026-03-10T05:00:00.000Z"
+        }
+      }
+    };
+    const perception = createPerception();
+    let runner: InstanceType<typeof ResidentAgentRunner> | undefined;
+
+    driverConnect.mockResolvedValue(undefined);
+    sleepLatestOvernight.mockResolvedValue(undefined);
+    sleepCurrentValues.mockResolvedValue(DEFAULT_VALUE_PROFILE);
+    memorySyncPerception.mockResolvedValue(interruptedMemory);
+    memoryPendingSleepWork.mockResolvedValue([]);
+    memoryCurrent.mockResolvedValue(interruptedMemory);
+    memoryReplace.mockResolvedValue(interruptedMemory);
+    memoryRemember.mockResolvedValue(interruptedMemory);
+    memoryRememberReport.mockResolvedValue(interruptedMemory);
+    memoryRememberActionSnapshot.mockResolvedValue(interruptedMemory);
+    executiveDecide.mockResolvedValue({
+      intent: {
+        agent_id: "resident-1",
+        intent_type: "observe",
+        reason: "reorient after respawn",
+        priority: 1,
+        cancel_conditions: [],
+        success_conditions: [],
+        dialogue: "I need to take in where I woke up.",
+        trigger: "respawn"
+      },
+      memory: interruptedMemory,
+      observations: [],
+      replanLevel: "hard"
+    });
+    runtimeTick
+      .mockResolvedValueOnce({ perception })
+      .mockImplementationOnce(async () => {
+        runner?.stop();
+        return {
+          perception,
+          report: {
+            intent_type: "observe",
+            status: "completed",
+            notes: [],
+            damage_taken: 0,
+            inventory_delta: {},
+            world_delta: [],
+            needs_replan: false
+          }
+        };
+      });
+
+    runner = new ResidentAgentRunner({
+      host: "127.0.0.1",
+      port: 25565,
+      username: "resident-1",
+      auth: "offline",
+      serveBrain: false,
+      intervalMs: 0
+    });
+
+    await runner.run();
+
+    expect(executiveDecide.mock.calls[0]?.[4]).toBe("respawn");
+    expect(memoryReplace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        emotion_core: expect.objectContaining({
+          pending_interrupt: undefined
+        })
+      })
+    );
+  });
+
   it("publishes the current intent dialogue through the presentation source shared with the brain server", async () => {
     const { ResidentAgentRunner } = await import("../src/agent-runner");
     const baseMemory = createMemory();
@@ -390,6 +475,91 @@ describe("ResidentAgentRunner", () => {
         residentId: "resident-1",
         residentName: "resident-1",
         text: "I should pause and read the shape of this place."
+      })
+    });
+  });
+
+  it("mirrors presentation updates to the standalone brain server when local brain serving is disabled", async () => {
+    const { ResidentAgentRunner } = await import("../src/agent-runner");
+    const baseMemory = createMemory();
+    const perception = createPerception();
+    let runner: InstanceType<typeof ResidentAgentRunner> | undefined;
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 202
+    });
+    driverConnect.mockResolvedValue(undefined);
+    sleepLatestOvernight.mockResolvedValue(undefined);
+    sleepCurrentValues.mockResolvedValue(DEFAULT_VALUE_PROFILE);
+    memorySyncPerception.mockResolvedValue(baseMemory);
+    memoryPendingSleepWork.mockResolvedValue([]);
+    memoryCurrent.mockResolvedValue(baseMemory);
+    memoryReplace.mockResolvedValue(baseMemory);
+    memoryRemember.mockResolvedValue(baseMemory);
+    memoryRememberReport.mockResolvedValue(baseMemory);
+    memoryRememberActionSnapshot.mockResolvedValue(baseMemory);
+    executiveDecide.mockResolvedValue({
+      intent: {
+        agent_id: "resident-1",
+        intent_type: "observe",
+        reason: "pause and think",
+        priority: 3,
+        cancel_conditions: [],
+        success_conditions: [],
+        dialogue: "I should look over the spruce line before I move.",
+        trigger: "idle_check"
+      },
+      memory: baseMemory,
+      observations: [],
+      replanLevel: "soft"
+    });
+    runtimeTick
+      .mockResolvedValueOnce({ perception })
+      .mockImplementationOnce(async () => {
+        runner?.stop();
+        return {
+          perception,
+          report: {
+            intent_type: "observe",
+            status: "completed",
+            notes: [],
+            damage_taken: 0,
+            inventory_delta: {},
+            world_delta: [],
+            needs_replan: false
+          }
+        };
+      });
+
+    runner = new ResidentAgentRunner({
+      host: "127.0.0.1",
+      port: 25565,
+      username: "resident-1",
+      auth: "offline",
+      serveBrain: false,
+      brainPort: 8787,
+      intervalMs: 0
+    });
+
+    await runner.run();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8787/resident/presentation",
+      expect.objectContaining({
+        method: "POST",
+        headers: {
+          "content-type": "application/json"
+        }
+      })
+    );
+    const requestInit = fetchMock.mock.calls.at(-1)?.[1] as { body?: string } | undefined;
+    expect(requestInit?.body).toBeDefined();
+    expect(JSON.parse(requestInit?.body ?? "{}")).toEqual({
+      thought: expect.objectContaining({
+        residentId: "resident-1",
+        residentName: "resident-1",
+        text: "I should look over the spruce line before I move."
       })
     });
   });
@@ -477,6 +647,37 @@ function createMemory(): MemoryState {
       security: 0.7,
       belonging: 0.6,
       satisfaction: 0.6
+    },
+    emotion_core: {
+      axes: {
+        threat: 0.18,
+        loss: 0.08,
+        pain: 0.06,
+        curiosity: 0.46,
+        connection: 0.4,
+        comfort: 0.5,
+        mastery: 0.38,
+        wonder: 0.42
+      },
+      regulation: {
+        arousal: 0.28,
+        shock: 0.04,
+        vigilance: 0.22,
+        resolve: 0.42,
+        recovery: 0.56
+      },
+      action_biases: {
+        avoid_risk: 0.18,
+        seek_shelter: 0.18,
+        seek_recovery: 0.16,
+        seek_company: 0.18,
+        seek_mastery: 0.24,
+        seek_wonder: 0.28,
+        cautious_revisit: 0.08
+      },
+      dominant_emotions: ["steady"],
+      recent_episodes: [],
+      tagged_places: []
     },
     self_narrative: ["I am here to live well."],
     carry_over_commitments: [],

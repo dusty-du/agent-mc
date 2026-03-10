@@ -98,6 +98,27 @@ export class OpenAIExecutivePlanner implements ExecutivePlanner {
                     need_state: input.memory.need_state,
                     mind_state: input.memory.mind_state,
                     bootstrap_progress: input.memory.bootstrap_progress,
+                    emotion_core: {
+                      dominant_emotions: input.memory.emotion_core.dominant_emotions,
+                      axes: input.memory.emotion_core.axes,
+                      regulation: input.memory.emotion_core.regulation,
+                      action_biases: input.memory.emotion_core.action_biases,
+                      active_episode: input.memory.emotion_core.active_episode
+                        ? {
+                            kind: input.memory.emotion_core.active_episode.kind,
+                            summary: input.memory.emotion_core.active_episode.summary,
+                            cause_tags: input.memory.emotion_core.active_episode.cause_tags,
+                            focal_location: input.memory.emotion_core.active_episode.focal_location,
+                            respawn_location: input.memory.emotion_core.active_episode.respawn_location,
+                            inventory_loss: input.memory.emotion_core.active_episode.inventory_loss,
+                            intensity: input.memory.emotion_core.active_episode.intensity,
+                            revisit_policy: input.memory.emotion_core.active_episode.revisit_policy,
+                            resolved: input.memory.emotion_core.active_episode.resolved
+                          }
+                        : undefined,
+                      tagged_places: input.memory.emotion_core.tagged_places,
+                      pending_interrupt: input.memory.emotion_core.pending_interrupt
+                    },
                     current_goals: input.memory.current_goals,
                     carry_over_commitments: input.memory.carry_over_commitments,
                     recent_dangers: input.memory.recent_dangers,
@@ -105,7 +126,12 @@ export class OpenAIExecutivePlanner implements ExecutivePlanner {
                     self_narrative: input.memory.self_narrative,
                     place_tags: input.memory.place_tags
                   },
-                  overnight: input.overnight,
+                  overnight: input.overnight
+                    ? {
+                        ...input.overnight,
+                        emotional_themes: input.overnight.emotional_themes
+                      }
+                    : undefined,
                   values: input.values,
                   schema: {
                     intent: {

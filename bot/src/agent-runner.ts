@@ -19,6 +19,7 @@ import {
   PerceptionFrame,
   ProtectedArea,
   RecentActionSnapshot,
+  ResidentPresentationState,
   ReplanTrigger,
   ValueProfile
 } from "@resident/shared";
@@ -45,10 +46,12 @@ export class ResidentAgentRunner {
   private readonly intervalMs: number;
   private readonly serveBrain: boolean;
   private readonly brainPort: number;
+  private readonly remotePresentationEndpoint?: string;
   private brainServer?: ReturnType<typeof createResidentBrainServer>;
   private stopped = false;
   private pendingTrigger: ReplanTrigger = "spawn";
   private daily = new DailyAccumulator();
+  private presentationSync = Promise.resolve();
 
   constructor(private readonly config: ResidentAgentRunnerConfig) {
     this.driver = new LiveMineflayerDriver({
@@ -59,6 +62,7 @@ export class ResidentAgentRunner {
     this.intervalMs = config.intervalMs ?? Number(process.env.RESIDENT_LOOP_MS ?? 4000);
     this.serveBrain = config.serveBrain ?? true;
     this.brainPort = config.brainPort ?? Number(process.env.RESIDENT_BRAIN_PORT ?? 8787);
+    this.remotePresentationEndpoint = this.serveBrain ? undefined : `http://127.0.0.1:${this.brainPort}/resident/presentation`;
     const sleepStore = new FileBackedSleepStore(
       config.sleepStorePath ?? process.env.RESIDENT_SLEEP_STORE ?? `${process.cwd()}/brain/.resident-data/sleep-core.json`
     );
@@ -71,6 +75,10 @@ export class ResidentAgentRunner {
 
   async run(): Promise<void> {
     await this.driver.connect();
+    if (this.remotePresentationEndpoint) {
+      void this.syncPresentationState({ thought: null });
+      this.presentation.on("update", this.handlePresentationUpdate);
+    }
     if (this.serveBrain) {
       this.brainServer = createResidentBrainServer(this.memory, this.sleepCore, this.brainPort, {
         presentation: this.presentation
@@ -93,8 +101,8 @@ export class ResidentAgentRunner {
 
     while (!this.stopped) {
       ({ latestOvernight, values } = await this.flushPendingSleepWork(latestOvernight, values));
-      const trigger = this.pendingTrigger;
       const currentMemory = await this.memory.current();
+      const trigger = currentMemory.emotion_core.pending_interrupt?.trigger ?? this.pendingTrigger;
       residentLog("planning_turn", {
         trigger,
         day: currentMemory.current_day,
@@ -114,7 +122,29 @@ export class ResidentAgentRunner {
         this.presentation.clear();
       }
       const latestMemory = await this.memory.current();
-      await this.memory.replace(mergeMemoryState(decision.memory, latestMemory));
+      const mergedMemory = mergeMemoryState(
+        trigger === "death" || trigger === "respawn"
+          ? {
+              ...decision.memory,
+              emotion_core: {
+                ...decision.memory.emotion_core,
+                pending_interrupt: undefined
+              }
+            }
+          : decision.memory,
+        latestMemory
+      );
+      await this.memory.replace(
+        trigger === "death" || trigger === "respawn"
+          ? {
+              ...mergedMemory,
+              emotion_core: {
+                ...mergedMemory.emotion_core,
+                pending_interrupt: undefined
+              }
+            }
+          : mergedMemory
+      );
       for (const observation of decision.observations) {
         await this.memory.remember(observation);
       }
@@ -210,7 +240,43 @@ export class ResidentAgentRunner {
 
   stop(): void {
     this.stopped = true;
+    this.presentation.off("update", this.handlePresentationUpdate);
     this.brainServer?.close();
+  }
+
+  private readonly handlePresentationUpdate = (state: ResidentPresentationState) => {
+    void this.syncPresentationState(state);
+  };
+
+  private syncPresentationState(state: ResidentPresentationState): Promise<void> {
+    if (!this.remotePresentationEndpoint) {
+      return Promise.resolve();
+    }
+
+    this.presentationSync = this.presentationSync
+      .catch(() => {})
+      .then(async () => {
+        try {
+          const response = await fetch(this.remotePresentationEndpoint as string, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json"
+            },
+            body: JSON.stringify(state)
+          });
+          if (!response.ok) {
+            residentLog("presentation_sync_failed", {
+              status: response.status
+            });
+          }
+        } catch (error) {
+          residentLog("presentation_sync_failed", {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      });
+
+    return this.presentationSync;
   }
 
   private async flushPendingSleepWork(
@@ -380,7 +446,7 @@ function classifyTrigger(
   report: ActionReport | undefined,
   lastTrigger: ReplanTrigger
 ): ReplanTrigger {
-  if (lastTrigger === "wake") {
+  if (lastTrigger === "wake" || lastTrigger === "death" || lastTrigger === "respawn") {
     return "idle_check";
   }
   if (current.health < previous.health) {
@@ -489,11 +555,83 @@ function mergeMemoryState(primary: MemoryState, latest: MemoryState): MemoryStat
     recent_dangers: mergeStrings(primary.recent_dangers, latest.recent_dangers, 10),
     recent_action_snapshots: mergeActionSnapshots(primary.recent_action_snapshots, latest.recent_action_snapshots),
     place_tags: mergeStrings(primary.place_tags, latest.place_tags, 12),
+    emotion_core: mergeEmotionCore(primary.emotion_core, latest.emotion_core),
     self_narrative: mergeStrings(primary.self_narrative, latest.self_narrative, 12),
     carry_over_commitments: mergeStrings(primary.carry_over_commitments, latest.carry_over_commitments, 10),
     last_wake_orientation: primary.last_wake_orientation ?? latest.last_wake_orientation,
     last_updated_at: new Date().toISOString()
   };
+}
+
+function mergeEmotionCore(primary: MemoryState["emotion_core"], latest: MemoryState["emotion_core"]): MemoryState["emotion_core"] {
+  return {
+    axes: { ...latest.axes, ...primary.axes },
+    regulation: { ...latest.regulation, ...primary.regulation },
+    action_biases: { ...latest.action_biases, ...primary.action_biases },
+    dominant_emotions: [...new Set([...primary.dominant_emotions, ...latest.dominant_emotions])].slice(0, 3),
+    active_episode:
+      primary.active_episode && (!latest.active_episode || primary.active_episode.intensity >= latest.active_episode.intensity)
+        ? {
+            ...primary.active_episode,
+            dominant_emotions: [...primary.active_episode.dominant_emotions],
+            cause_tags: [...primary.active_episode.cause_tags],
+            focal_location: primary.active_episode.focal_location ? { ...primary.active_episode.focal_location } : undefined,
+            respawn_location: primary.active_episode.respawn_location ? { ...primary.active_episode.respawn_location } : undefined,
+            inventory_loss: [...primary.active_episode.inventory_loss],
+            appraisal: { ...primary.active_episode.appraisal },
+            regulation: { ...primary.active_episode.regulation }
+          }
+        : latest.active_episode
+          ? {
+              ...latest.active_episode,
+              dominant_emotions: [...latest.active_episode.dominant_emotions],
+              cause_tags: [...latest.active_episode.cause_tags],
+              focal_location: latest.active_episode.focal_location ? { ...latest.active_episode.focal_location } : undefined,
+              respawn_location: latest.active_episode.respawn_location ? { ...latest.active_episode.respawn_location } : undefined,
+              inventory_loss: [...latest.active_episode.inventory_loss],
+              appraisal: { ...latest.active_episode.appraisal },
+              regulation: { ...latest.active_episode.regulation }
+            }
+          : undefined,
+    recent_episodes: mergeEmotionEpisodes(primary.recent_episodes, latest.recent_episodes),
+    tagged_places: mergeTaggedPlaces(primary.tagged_places, latest.tagged_places),
+    pending_interrupt: primary.pending_interrupt ?? latest.pending_interrupt
+  };
+}
+
+function mergeEmotionEpisodes(
+  primary: MemoryState["emotion_core"]["recent_episodes"],
+  latest: MemoryState["emotion_core"]["recent_episodes"]
+): MemoryState["emotion_core"]["recent_episodes"] {
+  const merged = new Map<string, MemoryState["emotion_core"]["recent_episodes"][number]>();
+  for (const episode of [...latest, ...primary]) {
+    merged.set(episode.id, {
+      ...episode,
+      dominant_emotions: [...episode.dominant_emotions],
+      cause_tags: [...episode.cause_tags],
+      focal_location: episode.focal_location ? { ...episode.focal_location } : undefined,
+      respawn_location: episode.respawn_location ? { ...episode.respawn_location } : undefined,
+      inventory_loss: [...episode.inventory_loss],
+      appraisal: { ...episode.appraisal },
+      regulation: { ...episode.regulation }
+    });
+  }
+  return [...merged.values()].slice(-12);
+}
+
+function mergeTaggedPlaces(
+  primary: MemoryState["emotion_core"]["tagged_places"],
+  latest: MemoryState["emotion_core"]["tagged_places"]
+): MemoryState["emotion_core"]["tagged_places"] {
+  const merged = new Map<string, MemoryState["emotion_core"]["tagged_places"][number]>();
+  for (const place of [...latest, ...primary]) {
+    merged.set(`${place.kind}:${Math.round(place.location.x)}:${Math.round(place.location.y)}:${Math.round(place.location.z)}`, {
+      ...place,
+      location: { ...place.location },
+      cause_tags: [...place.cause_tags]
+    });
+  }
+  return [...merged.values()].slice(-8);
 }
 
 function mergeStrings(primary: string[], latest: string[], limit: number): string[] {

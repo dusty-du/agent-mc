@@ -14,6 +14,7 @@ export * from "./memory/memory-state";
 export * from "./memory/memory-manager";
 export * from "./memory/recall";
 export * from "./memory/file-store";
+export * from "./emotion-core";
 export * from "./sleep/file-store";
 export * from "./sleep/openai-sleep-consolidator";
 export * from "./executive/openai-executive";

@@ -21,6 +21,15 @@ import {
   DEFAULT_MIND_STATE,
   DEFAULT_NEED_STATE
 } from "@resident/shared";
+import {
+  applyEmotionActionReport,
+  applyEmotionObservation,
+  applyResidentEmotionEvent,
+  consumePendingEmotionInterrupt,
+  createEmotionCoreState,
+  ResidentEmotionEvent,
+  syncEmotionCoreFromPerception
+} from "../emotion-core";
 
 function defaultAffect(): AffectState {
   return {
@@ -75,6 +84,7 @@ export function createMemoryState(): MemoryState {
     recent_action_snapshots: [],
     place_tags: [],
     affect: defaultAffect(),
+    emotion_core: createEmotionCoreState(),
     self_narrative: ["I am here to live, learn, and shape a world worth returning to."],
     carry_over_commitments: [],
     last_updated_at: nowIso()
@@ -102,6 +112,20 @@ export function syncMemoryState(
   const bootstrapProgress = deriveBootstrapProgress(perception);
   const needState = deriveNeedState(perception, affect, bootstrapProgress, memory.need_state);
   const mindState = deriveMindState(perception, affect, needState, memory.recent_action_snapshots, personality.chronotype);
+  const emotionCore = syncEmotionCoreFromPerception(
+    memory.emotion_core,
+    perception,
+    {
+      affect,
+      bootstrap: bootstrapProgress,
+      homeAnchor: perception.home_state.anchor ?? memory.home_anchor,
+      needs: needState,
+      personality,
+      placeTags: memory.place_tags,
+      recentActions: memory.recent_action_snapshots,
+      overnightThemes: overnight?.emotional_themes
+    }
+  );
 
   const next: MemoryState = {
     ...memory,
@@ -146,6 +170,7 @@ export function syncMemoryState(
       ...(perception.home_state.shelterScore > 0.6 ? ["home"] : [])
     ]),
     affect,
+    emotion_core: emotionCore,
     carry_over_commitments: overnight
       ? trimUnique([...overnight.carry_over_commitments, ...memory.carry_over_commitments])
       : [...memory.carry_over_commitments],
@@ -188,6 +213,7 @@ export function rememberObservation(memory: MemoryState, observation: MemoryObse
     place_tags: trimUnique([...memory.place_tags, ...observation.tags]),
     pantry_notes: pantryNotes,
     affect: observation.affect ? { ...observation.affect } : memory.affect,
+    emotion_core: applyEmotionObservation(memory.emotion_core, observation, { personality: memory.personality_profile }),
     self_narrative: trim([...memory.self_narrative, observation.summary], 10),
     last_updated_at: nowIso()
   };
@@ -219,6 +245,7 @@ export function rememberActionReport(memory: MemoryState, report: ActionReport):
     recent_dangers:
       report.damage_taken > 0 ? trim([...memory.recent_dangers, `Took ${report.damage_taken} damage during ${report.intent_type}.`]) : memory.recent_dangers,
     active_projects: updatedProjects,
+    emotion_core: applyEmotionActionReport(memory.emotion_core, report),
     self_narrative: trim([...memory.self_narrative, note]),
     last_updated_at: nowIso()
   };
@@ -277,22 +304,75 @@ export function buildMemoryBundle(memory: MemoryState, agentId: string): MemoryB
     recent_interactions: [...memory.recent_interactions],
     recent_action_snapshots: [...memory.recent_action_snapshots],
     place_tags: [...memory.place_tags],
-    final_affect: { ...memory.affect }
+    final_affect: { ...memory.affect },
+    emotion_core: {
+      ...memory.emotion_core,
+      axes: { ...memory.emotion_core.axes },
+      regulation: { ...memory.emotion_core.regulation },
+      action_biases: { ...memory.emotion_core.action_biases },
+      dominant_emotions: [...memory.emotion_core.dominant_emotions],
+      active_episode: memory.emotion_core.active_episode
+        ? {
+            ...memory.emotion_core.active_episode,
+            dominant_emotions: [...memory.emotion_core.active_episode.dominant_emotions],
+            cause_tags: [...memory.emotion_core.active_episode.cause_tags],
+            focal_location: memory.emotion_core.active_episode.focal_location ? { ...memory.emotion_core.active_episode.focal_location } : undefined,
+            respawn_location: memory.emotion_core.active_episode.respawn_location ? { ...memory.emotion_core.active_episode.respawn_location } : undefined,
+            inventory_loss: [...memory.emotion_core.active_episode.inventory_loss],
+            appraisal: { ...memory.emotion_core.active_episode.appraisal },
+            regulation: { ...memory.emotion_core.active_episode.regulation }
+          }
+        : undefined,
+      recent_episodes: memory.emotion_core.recent_episodes.map((episode) => ({
+        ...episode,
+        dominant_emotions: [...episode.dominant_emotions],
+        cause_tags: [...episode.cause_tags],
+        focal_location: episode.focal_location ? { ...episode.focal_location } : undefined,
+        respawn_location: episode.respawn_location ? { ...episode.respawn_location } : undefined,
+        inventory_loss: [...episode.inventory_loss],
+        appraisal: { ...episode.appraisal },
+        regulation: { ...episode.regulation }
+      })),
+      tagged_places: memory.emotion_core.tagged_places.map((place) => ({
+        ...place,
+        location: { ...place.location },
+        cause_tags: [...place.cause_tags]
+      })),
+      pending_interrupt: memory.emotion_core.pending_interrupt ? { ...memory.emotion_core.pending_interrupt } : undefined
+    }
   };
 }
 
 export function applyWakeOrientation(memory: MemoryState, orientation: WakeOrientation): MemoryState {
+  const preserveContext = Boolean(memory.emotion_core.active_episode && !memory.emotion_core.active_episode.resolved);
   return {
     ...memory,
     current_day: orientation.day_number,
     current_goals: [...orientation.current_priorities],
     carry_over_commitments: [...orientation.carry_over_commitments],
-    recent_observations: [],
-    recent_interactions: [],
-    recent_dangers: [],
-    place_tags: memory.home_anchor ? ["home"] : [],
+    recent_observations: preserveContext ? memory.recent_observations.slice(-6) : [],
+    recent_interactions: preserveContext ? memory.recent_interactions.slice(-4) : [],
+    recent_dangers: preserveContext ? memory.recent_dangers.slice(-4) : [],
+    place_tags: preserveContext ? trimUnique([...memory.place_tags, ...(memory.home_anchor ? ["home"] : [])], 12) : memory.home_anchor ? ["home"] : [],
+    emotion_core: preserveContext ? { ...memory.emotion_core } : consumePendingEmotionInterrupt(memory.emotion_core),
     self_narrative: trim([...memory.self_narrative, orientation.narration ?? "A new day begins."]),
     last_wake_orientation: orientation,
+    last_updated_at: nowIso()
+  };
+}
+
+export function applyResidentEmotionEventToMemory(memory: MemoryState, event: ResidentEmotionEvent): MemoryState {
+  return {
+    ...memory,
+    emotion_core: applyResidentEmotionEvent(memory.emotion_core, event, memory.personality_profile, event.timestamp),
+    last_updated_at: nowIso()
+  };
+}
+
+export function consumeEmotionInterrupt(memory: MemoryState): MemoryState {
+  return {
+    ...memory,
+    emotion_core: consumePendingEmotionInterrupt(memory.emotion_core),
     last_updated_at: nowIso()
   };
 }

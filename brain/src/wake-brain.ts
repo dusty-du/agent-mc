@@ -17,7 +17,13 @@ import {
   WakeOrientation
 } from "@resident/shared";
 import { DEFAULT_VALUE_PROFILE } from "@resident/shared";
-import { applyWakeOrientation, createMemoryState, syncMemoryState } from "./memory/memory-state";
+import {
+  composeEmotionDialogue,
+  emotionCandidateBias,
+  emotionInterruptIntent,
+  taggedPlaceAvoidancePenalty
+} from "./emotion-core";
+import { applyWakeOrientation, consumeEmotionInterrupt, createMemoryState, syncMemoryState } from "./memory/memory-state";
 import { SemanticBuildPlanner } from "./planning/build-planner";
 import { CraftPlanner } from "./planning/craft-planner";
 
@@ -39,6 +45,7 @@ interface SurvivalIntentPlan {
   successConditions: string[];
   dialogue: string;
   observation: string;
+  observationTags: string[];
   project?: Pick<ProjectState, "title" | "kind" | "status" | "summary" | "location">;
 }
 
@@ -88,7 +95,7 @@ function observationFrom(
 }
 
 function replanLevelFor(trigger: ReplanTrigger): ReplanLevel {
-  if (["spawn", "wake", "damage", "hostile_detection", "task_failure", "protected_area_conflict"].includes(trigger)) {
+  if (["spawn", "death", "respawn", "wake", "damage", "hostile_detection", "task_failure", "protected_area_conflict"].includes(trigger)) {
     return "hard";
   }
   if (["dawn", "dusk", "hunger_threshold", "inventory_change", "player_interaction", "task_completion", "idle_check"].includes(trigger)) {
@@ -131,6 +138,39 @@ export class WakeBrain {
           "reflection"
         )
       );
+    }
+
+    const emotionPlan = this.planEmotionInterrupt(frame, nextMemory, trigger);
+    if (emotionPlan) {
+      observations.push(
+        observationFrom(
+          frame,
+          emotionObservationCategory(emotionPlan.intentType),
+          emotionPlan.observation,
+          ["emotion", ...emotionPlan.observationTags],
+          "reflection"
+        )
+      );
+      const interruptedMemory = emotionPlan.project
+        ? rememberProject(consumeEmotionInterrupt(nextMemory), emotionPlan.project)
+        : consumeEmotionInterrupt(nextMemory);
+      return {
+        intent: {
+          agent_id: frame.agent_id,
+          intent_type: emotionPlan.intentType,
+          target: emotionPlan.target,
+          reason: emotionPlan.reason,
+          priority: 1,
+          cancel_conditions: ["new immediate danger appears"],
+          success_conditions: emotionPlan.successConditions,
+          dialogue: emotionPlan.dialogue,
+          trigger
+        },
+        memory: interruptedMemory,
+        observations,
+        replanLevel,
+        wakeOrientation
+      };
     }
 
     if (trigger === "protected_area_conflict") {
@@ -278,9 +318,9 @@ export class WakeBrain {
       observations.push(
         observationFrom(
           frame,
-          "food",
+          survivalIntent.intentType === "recover" ? "recovery" : survivalIntent.intentType === "observe" ? "orientation" : "food",
           survivalIntent.observation,
-          ["food", "survival", survivalIntent.intentType === "move" ? "bootstrap" : survivalIntent.intentType]
+          survivalIntent.observationTags
         )
       );
       return {
@@ -389,17 +429,27 @@ export class WakeBrain {
   }
 
   private orient(frame: PerceptionFrame, memory: MemoryState, overnight?: OvernightConsolidation): WakeOrientation {
+    const unresolvedEpisode =
+      memory.emotion_core.active_episode && !memory.emotion_core.active_episode.resolved
+        ? memory.emotion_core.active_episode
+        : undefined;
     const immediateNeeds = [
       ...(frame.hunger <= 10 ? ["eat soon"] : []),
       ...(frame.combat_state.hostilesNearby > 0 ? ["find safety"] : []),
-      ...(!frame.home_state.bedAvailable ? ["secure a bed"] : [])
+      ...(!frame.home_state.bedAvailable ? ["secure a bed"] : []),
+      ...(unresolvedEpisode?.kind === "death" ? ["regain footing after death"] : [])
     ];
     const riskFlags = [
       ...memory.recent_dangers.slice(-2),
+      ...(memory.emotion_core.dominant_emotions.length > 0
+        ? [`Emotional tone: ${memory.emotion_core.dominant_emotions.join(", ")}`]
+        : []),
+      ...(unresolvedEpisode ? [unresolvedEpisode.summary] : []),
       ...(frame.combat_state.hostilesNearby > 0 ? [`Hostiles nearby: ${frame.combat_state.hostilesNearby}`] : [])
     ];
     const priorities = [
       ...immediateNeeds,
+      ...(overnight?.emotional_themes?.slice(0, 2) ?? []),
       ...memory.carry_over_commitments.slice(0, 2),
       ...(overnight?.insights.slice(0, 2) ?? []),
       ...(memory.current_goals.slice(0, 2) ?? [])
@@ -413,11 +463,14 @@ export class WakeBrain {
       carry_over_commitments: overnight?.carry_over_commitments ?? memory.carry_over_commitments,
       recalled_memories: [
         ...(overnight?.place_memories.slice(0, 2) ?? []),
-        ...(overnight?.project_memories.slice(0, 2) ?? [])
+        ...(overnight?.project_memories.slice(0, 2) ?? []),
+        ...(unresolvedEpisode?.summary ? [unresolvedEpisode.summary] : [])
       ],
       current_priorities: priorities.length > 0 ? priorities : ["look around and decide what the day asks for"],
       narration:
-        frame.weather === "rain"
+        unresolvedEpisode?.kind === "death"
+          ? "I woke carrying the memory of dying. Today should begin with attention, not denial."
+          : frame.weather === "rain"
           ? "It is a wet morning. I should stay grounded in what matters."
           : "A new day is here. I can keep living, even if yesterday was imperfect."
     };
@@ -428,6 +481,50 @@ export class WakeBrain {
     const armorRelief = frame.combat_state.armorScore / 20;
     const threatPressure = frame.combat_state.hostilesNearby * 0.18;
     return Math.max(0, threatPressure + hungerPenalty - armorRelief);
+  }
+
+  private planEmotionInterrupt(
+    frame: PerceptionFrame,
+    memory: MemoryState,
+    trigger: ReplanTrigger
+  ): SurvivalIntentPlan | undefined {
+    if (trigger !== "death" && trigger !== "respawn") {
+      return undefined;
+    }
+
+    const intent = emotionInterruptIntent(memory, frame, trigger);
+    if (!intent) {
+      return undefined;
+    }
+
+    const fallbackLocation =
+      frame.home_state.anchor ??
+      memory.home_anchor ??
+      memory.emotion_core.active_episode?.respawn_location ??
+      memory.emotion_core.active_episode?.focal_location ??
+      frame.position;
+
+    return {
+      intentType: intent.intent_type,
+      target: intent.target,
+      reason: intent.reason,
+      successConditions:
+        intent.intent_type === "observe"
+          ? ["the current surroundings are assessed"]
+          : intent.intent_type === "recover"
+            ? ["health, food, or calm improves"]
+            : ["a safer position is reached"],
+      dialogue: intent.dialogue,
+      observation: intent.observation,
+      observationTags: intent.observation_tags,
+      project: {
+        title: trigger === "death" ? "Recover after death" : "Reorient after respawn",
+        kind: "recovery",
+        status: "active",
+        summary: intent.reason,
+        location: intent.target ?? fallbackLocation
+      }
+    };
   }
 
   private pickDailyCandidate(
@@ -580,7 +677,7 @@ export class WakeBrain {
         priority: 4,
         cancel_conditions: ["immediate hunger or danger", "material bottleneck"],
         success_conditions: ["build stage completed"],
-        dialogue: "I want to make this place feel more like home."
+        dialogue: composeEmotionDialogue(memory, frame, "I want to make this place feel more like home.", "build")
       },
       observationCategory: buildIntent.rebuild_of ? "rebuild" : "building",
       observationSummary: `A new build direction is taking shape: ${buildIntent.purpose}.`,
@@ -644,7 +741,7 @@ export class WakeBrain {
         priority: 4,
         cancel_conditions: ["danger appears", "a clearer opportunity surfaces"],
         success_conditions: ["a more grounded next step becomes clear"],
-        dialogue: "I want one clear read of the moment before I commit."
+        dialogue: composeEmotionDialogue(memory, frame, "I want one clear read of the moment before I commit.", "observe")
       },
       observationCategory: "orientation",
       observationSummary: "A short pause can prevent a pointless loop and make the next step clearer.",
@@ -737,7 +834,7 @@ export class WakeBrain {
             priority: 3,
             cancel_conditions: ["danger appears", "night falls too close"],
             success_conditions: ["wood collected for basic survival work"],
-            dialogue: "I need wood before this place can start feeling livable."
+            dialogue: composeEmotionDialogue(memory, frame, "I need wood before this place can start feeling livable.", "gather")
           },
           observationCategory: "project",
           observationSummary: "The first good decision is still wood; nothing durable starts without it.",
@@ -766,7 +863,12 @@ export class WakeBrain {
             priority: 3,
             cancel_conditions: ["danger appears", "night falls too close"],
             success_conditions: ["reached a more promising place to continue surviving"],
-            dialogue: `I should head toward the ${scoutTarget.label} and see what it offers.`
+            dialogue: composeEmotionDialogue(
+              memory,
+              frame,
+              `I should head toward the ${scoutTarget.label} and see what it offers.`,
+              "move"
+            )
           },
           observationCategory: "project",
           observationSummary: "Standing still will not solve survival; I need a better foothold.",
@@ -796,7 +898,7 @@ export class WakeBrain {
           priority: 3,
           cancel_conditions: ["danger appears", "materials run out"],
           success_conditions: ["basic shelter becomes safer and more usable"],
-          dialogue: "I need a shelter that can actually hold the night back."
+          dialogue: composeEmotionDialogue(memory, frame, "I need a shelter that can actually hold the night back.", "build")
         },
         observationCategory: "building",
         observationSummary: "Temporary shelter is the next real milestone; decoration can wait.",
@@ -827,7 +929,12 @@ export class WakeBrain {
             priority: 3,
             cancel_conditions: ["danger appears", "night falls too close"],
             success_conditions: ["reached a better place for food or shelter work"],
-            dialogue: `I should check the ${scoutTarget.label} before hunger gets louder.`
+            dialogue: composeEmotionDialogue(
+              memory,
+              frame,
+              `I should check the ${scoutTarget.label} before hunger gets louder.`,
+              "move"
+            )
           },
           observationCategory: "food",
           observationSummary: "Food security is still unfinished, so I should move toward better ground for it.",
@@ -954,7 +1061,8 @@ function pickSurvivalIntent(frame: PerceptionFrame, memory: MemoryState): Surviv
       reason: "Preserve calories, recover stability, and protect tomorrow.",
       successConditions: ["safe meal consumed or food source secured"],
       dialogue: "I should feed myself before doing anything reckless.",
-      observation: "Food security needs attention before larger ambitions."
+      observation: "Food security needs attention before larger ambitions.",
+      observationTags: ["food", "survival", "eat"]
     };
   }
 
@@ -965,6 +1073,7 @@ function pickSurvivalIntent(frame: PerceptionFrame, memory: MemoryState): Surviv
       successConditions: ["crops harvested, planted, or farmland improved"],
       dialogue: "I should tend the fields before hunger turns into panic.",
       observation: "Food security needs attention before larger ambitions.",
+      observationTags: ["food", "survival", "farm"],
       project: {
         title: "Keep the fields alive",
         kind: "farm",
@@ -985,7 +1094,8 @@ function pickSurvivalIntent(frame: PerceptionFrame, memory: MemoryState): Surviv
     reason: "Pause briefly and reassess because no immediate food or movement opportunity is visible yet.",
     successConditions: ["a safer next step becomes clear"],
     dialogue: "I need to look carefully before I commit myself.",
-    observation: "The immediate area offers no obvious food path, so a careful pause is wiser than pretending otherwise."
+    observation: "The immediate area offers no obvious food path, so a careful pause is wiser than pretending otherwise.",
+    observationTags: ["orientation", "survival", "observe"]
   };
 }
 
@@ -1113,8 +1223,9 @@ function pickEmergencyBootstrapIntent(frame: PerceptionFrame, memory: MemoryStat
       target: "wood",
       reason: "Gather wood first so shelter, tools, and food systems are actually possible.",
       successConditions: ["wood collected for basic survival work"],
-      dialogue: "I need wood before this place can start feeling livable.",
+      dialogue: composeEmotionDialogue(memory, frame, "I need wood before this place can start feeling livable.", "gather"),
       observation: "I need materials before food security and shelter can take shape.",
+      observationTags: ["bootstrap", "wood", "survival"],
       project: {
         title: "Bootstrap the basics",
         kind: "explore",
@@ -1135,8 +1246,14 @@ function pickEmergencyBootstrapIntent(frame: PerceptionFrame, memory: MemoryStat
     target: scoutTarget.location,
     reason: `Move toward ${scoutTarget.label} to find better ground for food and shelter.`,
     successConditions: ["reached a more promising place to continue surviving"],
-    dialogue: `I should head toward the ${scoutTarget.label} and see what it offers.`,
+    dialogue: composeEmotionDialogue(
+      memory,
+      frame,
+      `I should head toward the ${scoutTarget.label} and see what it offers.`,
+      "move"
+    ),
     observation: "Standing still will not solve food security; I need a better place to work from.",
+    observationTags: ["bootstrap", "scout", "survival"],
     project: {
       title: "Scout a better foothold",
       kind: "explore",
@@ -1262,8 +1379,10 @@ function scoreCandidate(
   score += needBias(candidate.kind, memory);
   score += personalityBias(candidate.kind, memory);
   score += valueBias(candidate.kind, values, memory);
+  score += emotionBias(candidate.kind, frame, memory, values);
   score -= repeatedPenalty;
   score -= movementCost(frame.position, candidate.intent.target);
+  score -= taggedPlaceAvoidancePenalty(typeof candidate.intent.target === "string" ? undefined : candidate.intent.target, memory);
 
   if (frame.weather !== "clear" && candidate.kind === "explore") {
     score -= 0.18;
@@ -1375,7 +1494,7 @@ function personalityBias(kind: DailyCandidatePlan["kind"], memory: MemoryState):
     bias += 0.12;
   }
   if (motifSet.has("host") && ["social", "build"].includes(kind)) {
-    bias += kind === "social" ? 0.26 : 0.16;
+    bias += kind === "social" ? 0.4 : 0.16;
   }
   return bias;
 }
@@ -1401,6 +1520,25 @@ function valueBias(kind: DailyCandidatePlan["kind"], values: ValueProfile, memor
     case "observe":
       return 0;
   }
+}
+
+function emotionBias(
+  kind: DailyCandidatePlan["kind"],
+  frame: PerceptionFrame,
+  memory: MemoryState,
+  values: ValueProfile
+): number {
+  return emotionCandidateBias(kind, memory, frame, values);
+}
+
+function emotionObservationCategory(intentType: SurvivalIntentPlan["intentType"]): MemoryObservation["category"] {
+  if (intentType === "recover") {
+    return "recovery";
+  }
+  if (intentType === "observe") {
+    return "orientation";
+  }
+  return "danger";
 }
 
 function repetitionPenalty(recentActions: MemoryState["recent_action_snapshots"], family: string): number {

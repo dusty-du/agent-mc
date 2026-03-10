@@ -450,6 +450,128 @@ describe("WakeBrain combat decisions", () => {
     expect(wandererDecision.intent.intent_type).not.toBe(hostDecision.intent.intent_type);
   });
 
+  it("uses respawn emotion interrupts to reorient instead of dropping back into bootstrap autopilot", () => {
+    const memory = createMemoryWith({
+      bootstrap_progress: {
+        woodSecured: false,
+        toolsReady: false,
+        shelterSecured: false,
+        lightSecured: false,
+        foodSecured: false,
+        bedSecured: false
+      },
+      emotion_core: {
+        ...createMemoryState().emotion_core,
+        axes: {
+          threat: 0.72,
+          loss: 0.48,
+          pain: 0.84,
+          curiosity: 0.18,
+          connection: 0.2,
+          comfort: 0.1,
+          mastery: 0.22,
+          wonder: 0.04
+        },
+        regulation: {
+          arousal: 0.88,
+          shock: 0.92,
+          vigilance: 0.78,
+          resolve: 0.3,
+          recovery: 0.18
+        },
+        action_biases: {
+          avoid_risk: 0.82,
+          seek_shelter: 0.76,
+          seek_recovery: 0.8,
+          seek_company: 0.12,
+          seek_mastery: 0.18,
+          seek_wonder: 0.04,
+          cautious_revisit: 0.78
+        },
+        dominant_emotions: ["shaken", "wary"],
+        active_episode: {
+          id: "death:1",
+          kind: "death",
+          summary: "Otis was blown up by Creeper",
+          started_at: "2026-03-10T06:00:00.000Z",
+          updated_at: "2026-03-10T06:00:05.000Z",
+          source_trigger: "death",
+          dominant_emotions: ["shaken", "wary"],
+          cause_tags: ["death", "entity_explosion"],
+          world: "world",
+          focal_location: { x: 6, y: 64, z: 6 },
+          respawn_location: { x: 0, y: 64, z: 0 },
+          inventory_loss: [{ item: "oak_log", count: 8 }],
+          appraisal: {
+            threat: 0.72,
+            loss: 0.48,
+            pain: 0.84,
+            curiosity: 0.18,
+            connection: 0.2,
+            comfort: 0.1,
+            mastery: 0.22,
+            wonder: 0.04
+          },
+          regulation: {
+            arousal: 0.88,
+            shock: 0.92,
+            vigilance: 0.78,
+            resolve: 0.3,
+            recovery: 0.18
+          },
+          intensity: 0.82,
+          revisit_policy: "cautious",
+          resolved: false
+        },
+        tagged_places: [
+          {
+            kind: "death_site",
+            label: "entity explosion",
+            location: { x: 6, y: 64, z: 6 },
+            world: "world",
+            salience: 0.94,
+            cause_tags: ["death", "entity_explosion"],
+            revisit_policy: "cautious",
+            updated_at: "2026-03-10T06:00:05.000Z"
+          }
+        ],
+        pending_interrupt: {
+          trigger: "respawn",
+          reason: "Respawning should interrupt routine.",
+          created_at: "2026-03-10T06:00:05.000Z"
+        }
+      }
+    });
+
+    const decision = new WakeBrain().decide(
+      {
+        ...basePerception,
+        health: 14,
+        hunger: 10,
+        inventory: {},
+        home_state: {
+          ...basePerception.home_state,
+          shelterScore: 0.25,
+          bedAvailable: false,
+          workshopReady: false
+        },
+        safe_route_state: {
+          ...basePerception.safe_route_state,
+          nearestShelter: { x: 0, y: 64, z: 0 }
+        }
+      },
+      memory,
+      DEFAULT_VALUE_PROFILE,
+      undefined,
+      "respawn"
+    );
+
+    expect(["move", "recover", "observe", "retreat"]).toContain(decision.intent.intent_type);
+    expect(decision.intent.intent_type).not.toBe("gather");
+    expect(decision.intent.dialogue?.toLowerCase()).toContain("explosion");
+    expect(decision.observations.some((entry) => entry.tags.includes("emotion"))).toBe(true);
+  });
+
   it("prioritizes crafting torches before dusk when light is unsecured", () => {
     const decision = new WakeBrain().decide(
       {

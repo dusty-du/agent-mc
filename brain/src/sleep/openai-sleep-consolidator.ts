@@ -44,8 +44,9 @@ export class OpenAISleepConsolidator implements SleepConsolidator {
                 text:
                   "You are sleep-core for an autonomous Minecraft resident. " +
                   "Perform overnight autobiographical consolidation only. " +
-                  "The bundle includes personality, current needs, recent action snapshots, and bootstrap progress. " +
+                  "The bundle includes personality, current needs, recent action snapshots, bootstrap progress, and emotion-core state. " +
                   "Do not plan wake-time actions and do not invent new commitments. " +
+                  "Name emotional carry-over themes like wary, resolved, relieved, connected, or hopeful when they are justified by the day. " +
                   "Preserve meaning, safety, hospitality, home, and beauty. " +
                   "Return only strict JSON."
               }
@@ -110,6 +111,7 @@ function buildPayload(input: SleepConsolidationInput): {
     day_number: number;
     summary: string;
     insights: string[];
+    emotional_themes: string[];
     project_memories: string[];
     place_memories: string[];
   }>;
@@ -123,6 +125,7 @@ function buildPayload(input: SleepConsolidationInput): {
       day_number: record.dayNumber,
       summary: record.summary,
       insights: record.insights,
+      emotional_themes: record.overnight.emotional_themes,
       project_memories: record.overnight.project_memories,
       place_memories: record.overnight.place_memories
     })),
@@ -130,6 +133,7 @@ function buildPayload(input: SleepConsolidationInput): {
       summary: "string",
       insights: ["string"],
       risk_themes: ["string"],
+      emotional_themes: ["string"],
       place_memories: ["string"],
       project_memories: ["string"],
       creative_motifs: ["string"]

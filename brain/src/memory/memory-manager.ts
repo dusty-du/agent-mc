@@ -16,7 +16,9 @@ import { FileBackedMemoryStore, PendingSleepWork } from "./file-store";
 import { LongTermMemoryArchive, recallFromMemory } from "./recall";
 import {
   applyWakeOrientation,
+  applyResidentEmotionEventToMemory,
   buildMemoryBundle,
+  consumeEmotionInterrupt,
   mergeProtectedAreas,
   rememberActionSnapshot,
   rememberActionReport,
@@ -24,6 +26,7 @@ import {
   syncMemoryState,
   updateProtectedAreas
 } from "./memory-state";
+import { ResidentEmotionEvent } from "../emotion-core";
 
 export class MemoryManager {
   constructor(
@@ -88,6 +91,20 @@ export class MemoryManager {
   async applyOrientation(orientation: WakeOrientation): Promise<MemoryState> {
     const data = await this.store.load();
     data.memory = applyWakeOrientation(data.memory, orientation);
+    await this.store.save(data);
+    return data.memory;
+  }
+
+  async applyResidentEmotionEvent(event: ResidentEmotionEvent): Promise<MemoryState> {
+    const data = await this.store.load();
+    data.memory = applyResidentEmotionEventToMemory(data.memory, event);
+    await this.store.save(data);
+    return data.memory;
+  }
+
+  async consumeEmotionInterrupt(): Promise<MemoryState> {
+    const data = await this.store.load();
+    data.memory = consumeEmotionInterrupt(data.memory);
     await this.store.save(data);
     return data.memory;
   }

@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_LIVESTOCK_STATE, PerceptionFrame } from "@resident/shared";
-import { buildMemoryBundle, rememberActionReport, rememberActionSnapshot, rememberObservation, syncMemoryState } from "../src/memory/memory-state";
+import {
+  applyResidentEmotionEventToMemory,
+  applyWakeOrientation,
+  buildMemoryBundle,
+  rememberActionReport,
+  rememberActionSnapshot,
+  rememberObservation,
+  syncMemoryState
+} from "../src/memory/memory-state";
 import { createMemoryState } from "../src/memory/memory-state";
 
 describe("memory-state", () => {
@@ -96,6 +104,59 @@ describe("memory-state", () => {
     expect(named.self_name).toBeTruthy();
     expect(named.self_name_chosen_at).toBeTruthy();
     expect(sameAfterSecondSync.self_name).toBe(named.self_name);
+  });
+
+  it("preserves unresolved death context through wake orientation", () => {
+    let memory = rememberObservation(createMemoryState(), {
+      timestamp: "2026-03-10T06:00:00.000Z",
+      category: "danger",
+      summary: "A creeper blast tore through the tree line.",
+      tags: ["danger", "combat", "explosion"],
+      importance: 0.95,
+      source: "perception"
+    });
+
+    memory = applyResidentEmotionEventToMemory(memory, {
+      type: "resident_death",
+      timestamp: "2026-03-10T06:00:01.000Z",
+      cause_tags: ["death", "entity_explosion"],
+      death_message: "Otis was blown up by Creeper",
+      dropped_items: [{ item: "oak_log", count: 8 }],
+      location: { x: 5, y: 64, z: 5 },
+      world: "world"
+    });
+
+    const oriented = applyWakeOrientation(memory, {
+      day_number: 1,
+      created_at: "2026-03-10T06:10:00.000Z",
+      immediate_needs: ["regain footing after death"],
+      risk_flags: ["Creeper blast nearby"],
+      carry_over_commitments: [],
+      recalled_memories: [],
+      current_priorities: ["recover"],
+      narration: "A rough morning asks for patience."
+    });
+
+    expect(oriented.recent_dangers.at(-1)).toContain("creeper blast");
+    expect(oriented.emotion_core.active_episode?.kind).toBe("death");
+    expect(oriented.emotion_core.pending_interrupt?.trigger).toBe("death");
+    expect(oriented.emotion_core.active_episode?.inventory_loss).toEqual([{ item: "oak_log", count: 8 }]);
+  });
+
+  it("turns beauty observations into positive emotion episodes", () => {
+    const memory = rememberObservation(createMemoryState(), {
+      timestamp: "2026-03-10T07:00:00.000Z",
+      category: "beauty",
+      summary: "Lantern light made the harbor doorway feel warm and alive.",
+      tags: ["beauty", "home", "lantern"],
+      importance: 0.85,
+      source: "reflection",
+      location: { x: 1, y: 64, z: 1 }
+    });
+
+    expect(memory.emotion_core.active_episode?.kind).toBe("beauty");
+    expect(memory.emotion_core.tagged_places.some((place) => place.kind === "awe_site")).toBe(true);
+    expect(memory.emotion_core.dominant_emotions).toContain("awed");
   });
 });
 

@@ -81,8 +81,20 @@ export class ResidentWatcherServer {
         socket.emit("primitive", primitive);
       }
 
+      const emitSelfEntitySpawn = () => {
+        socket.emit("entity", {
+          id: this.bot.entity.id,
+          name: this.bot.entity.name ?? "player",
+          pos: this.bot.entity.position,
+          width: this.bot.entity.width ?? 0.6,
+          height: this.bot.entity.height ?? 1.8,
+          username: this.bot.username
+        });
+      };
+
       const emitBotPosition = () => {
         const packet: Record<string, unknown> = {
+          entityId: this.bot.entity.id,
           pos: this.bot.entity.position,
           yaw: this.bot.entity.yaw,
           addMesh: true
@@ -91,11 +103,17 @@ export class ResidentWatcherServer {
           packet.pitch = this.bot.entity.pitch;
         }
         socket.emit("position", packet);
+        socket.emit("entity", {
+          id: this.bot.entity.id,
+          pos: this.bot.entity.position,
+          yaw: this.bot.entity.yaw
+        });
         void worldView.updatePosition(this.bot.entity.position);
       };
 
       this.bot.on("move", emitBotPosition);
       worldView.listenToBot(this.bot);
+      emitSelfEntitySpawn();
       emitBotPosition();
 
       socket.on("disconnect", () => {

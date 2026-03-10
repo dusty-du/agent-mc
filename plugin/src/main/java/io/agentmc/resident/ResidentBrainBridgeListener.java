@@ -8,6 +8,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.player.PlayerBedEnterEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.weather.WeatherChangeEvent;
 
 public final class ResidentBrainBridgeListener implements Listener {
@@ -39,7 +40,16 @@ public final class ResidentBrainBridgeListener implements Listener {
         String deathMessage = event.deathMessage() == null
             ? ""
             : PlainTextComponentSerializer.plainText().serialize(event.deathMessage());
-        brainClient.postResidentDeath(event.getPlayer(), deathMessage);
+        brainClient.postResidentDeath(event, deathMessage);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onResidentRespawn(PlayerRespawnEvent event) {
+        if (!plugin.isResidentPlayer(event.getPlayer())) {
+            return;
+        }
+
+        brainClient.postResidentRespawn(event);
     }
 
     @EventHandler(ignoreCancelled = true)

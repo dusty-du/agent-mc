@@ -54,6 +54,8 @@ export type EpisodeEventType =
 
 export type ReplanTrigger =
   | "spawn"
+  | "death"
+  | "respawn"
   | "wake"
   | "dawn"
   | "dusk"
@@ -145,6 +147,104 @@ export interface AffectState {
   security: number;
   belonging: number;
   satisfaction: number;
+}
+
+export interface EmotionAppraisalAxes {
+  threat: number;
+  loss: number;
+  pain: number;
+  curiosity: number;
+  connection: number;
+  comfort: number;
+  mastery: number;
+  wonder: number;
+}
+
+export interface EmotionRegulationState {
+  arousal: number;
+  shock: number;
+  vigilance: number;
+  resolve: number;
+  recovery: number;
+}
+
+export interface EmotionActionBiases {
+  avoid_risk: number;
+  seek_shelter: number;
+  seek_recovery: number;
+  seek_company: number;
+  seek_mastery: number;
+  seek_wonder: number;
+  cautious_revisit: number;
+}
+
+export type EmotionEpisodeKind =
+  | "death"
+  | "damage"
+  | "combat"
+  | "loss"
+  | "beauty"
+  | "social"
+  | "achievement"
+  | "safety";
+
+export type EmotionRevisitPolicy = "avoid" | "cautious" | "open";
+
+export interface InventoryDeltaSummary {
+  item: string;
+  count: number;
+}
+
+export interface EmotionEpisode {
+  id: string;
+  kind: EmotionEpisodeKind;
+  summary: string;
+  started_at: string;
+  updated_at: string;
+  source_trigger: ReplanTrigger | "event";
+  dominant_emotions: string[];
+  cause_tags: string[];
+  world?: string;
+  focal_location?: Vec3;
+  respawn_location?: Vec3;
+  inventory_loss: InventoryDeltaSummary[];
+  appraisal: EmotionAppraisalAxes;
+  regulation: EmotionRegulationState;
+  intensity: number;
+  revisit_policy: EmotionRevisitPolicy;
+  resolved: boolean;
+}
+
+export type EmotionTaggedPlaceKind = "death_site" | "comfort_site" | "awe_site";
+
+export interface EmotionTaggedPlace {
+  kind: EmotionTaggedPlaceKind;
+  label: string;
+  location: Vec3;
+  world?: string;
+  salience: number;
+  cause_tags: string[];
+  revisit_policy: EmotionRevisitPolicy;
+  updated_at: string;
+}
+
+export interface EmotionInterrupt {
+  trigger: Extract<ReplanTrigger, "death" | "respawn">;
+  reason: string;
+  created_at: string;
+  episode_id?: string;
+}
+
+export interface EmotionCoreState {
+  axes: EmotionAppraisalAxes;
+  regulation: EmotionRegulationState;
+  action_biases: EmotionActionBiases;
+  dominant_emotions: string[];
+  active_episode?: EmotionEpisode;
+  recent_episodes: EmotionEpisode[];
+  tagged_places: EmotionTaggedPlace[];
+  pending_interrupt?: EmotionInterrupt;
+  last_event_at?: string;
 }
 
 export interface WorkstationState {
@@ -410,6 +510,9 @@ export interface ResidentMindState {
   routinePhase: RoutinePhase;
 }
 
+export type EmotionAppraisal = EmotionAppraisalAxes;
+export type EmotionRegulation = EmotionRegulationState;
+
 export interface BootstrapProgress {
   woodSecured: boolean;
   toolsReady: boolean;
@@ -501,6 +604,7 @@ export interface MemoryState {
   recent_action_snapshots: RecentActionSnapshot[];
   place_tags: string[];
   affect: AffectState;
+  emotion_core: EmotionCoreState;
   self_narrative: string[];
   carry_over_commitments: string[];
   last_wake_orientation?: WakeOrientation;
@@ -525,6 +629,7 @@ export interface MemoryBundle {
   recent_action_snapshots: RecentActionSnapshot[];
   place_tags: string[];
   final_affect: AffectState;
+  emotion_core: EmotionCoreState;
 }
 
 export interface RecallQuery {
@@ -558,6 +663,7 @@ export interface OvernightConsolidation {
   insights: string[];
   carry_over_commitments: string[];
   risk_themes: string[];
+  emotional_themes: string[];
   place_memories: string[];
   project_memories: string[];
   value_shift_summary: string[];

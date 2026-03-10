@@ -125,9 +125,54 @@ describe("createResidentBrainServer", () => {
 
     const state = await memory.current();
     expect(state.recent_dangers.some((entry) => entry.includes("blown up"))).toBe(true);
+    expect(state.emotion_core.pending_interrupt?.trigger).toBe("death");
+    expect(state.emotion_core.active_episode?.kind).toBe("death");
+    expect(state.emotion_core.active_episode?.inventory_loss).toEqual([]);
     expect(state.recent_interactions.some((entry) => entry.includes("Alex said"))).toBe(true);
     expect(state.recent_observations.some((entry) => entry.category === "sleep")).toBe(true);
     expect(state.recent_observations.some((entry) => entry.category === "weather" && entry.summary.includes("rain"))).toBe(true);
+  });
+
+  it("attaches respawn context to the active death episode", async () => {
+    const { postEvent, memory } = await createHarness(cleanups);
+
+    await postEvent({
+      type: "resident_death",
+      timestamp: "2026-03-10T06:00:00.000Z",
+      player: {
+        name: "resident-1",
+        world: "world",
+        location: { x: 5, y: 64, z: 5 }
+      },
+      death_message: "resident-1 was blown up by Creeper",
+      cause: "entity_explosion",
+      dropped_items: {
+        oak_log: 6,
+        stone_pickaxe: 1
+      }
+    });
+
+    await postEvent({
+      type: "resident_respawn",
+      timestamp: "2026-03-10T06:00:05.000Z",
+      player: {
+        name: "resident-1",
+        world: "world",
+        location: { x: 0, y: 64, z: 0 }
+      },
+      respawn_location: { x: 0, y: 64, z: 0 },
+      bed_spawn: true,
+      respawn_reason: "bed"
+    });
+
+    const state = await memory.current();
+    expect(state.emotion_core.pending_interrupt?.trigger).toBe("respawn");
+    expect(state.emotion_core.active_episode?.kind).toBe("death");
+    expect(state.emotion_core.active_episode?.respawn_location).toEqual({ x: 0, y: 64, z: 0 });
+    expect(state.emotion_core.active_episode?.inventory_loss).toEqual([
+      { item: "oak_log", count: 6 },
+      { item: "stone_pickaxe", count: 1 }
+    ]);
   });
 
   it("feeds meaningful chat into sleep-core culture signals", async () => {
@@ -223,6 +268,39 @@ describe("createResidentBrainServer", () => {
         text: "I should check the fields before dusk.",
         createdAt: "2026-03-09T12:00:00.000Z",
         expiresAt: "2026-03-09T12:00:06.000Z"
+      }
+    });
+  });
+
+  it("accepts mirrored resident presentation updates when no live presentation source is attached", async () => {
+    const { port } = await createHarness(cleanups);
+
+    const updateResponse = await fetch(`http://127.0.0.1:${port}/resident/presentation`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        thought: {
+          residentId: "resident-1",
+          residentName: "resident-1",
+          text: "I should finish gathering this spruce before dark.",
+          createdAt: "2026-03-10T05:00:00.000Z",
+          expiresAt: "2099-03-10T05:00:06.000Z"
+        }
+      })
+    });
+    expect(updateResponse.status).toBe(202);
+
+    const response = await fetch(`http://127.0.0.1:${port}/resident/presentation`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      thought: {
+        residentId: "resident-1",
+        residentName: "resident-1",
+        text: "I should finish gathering this spruce before dark.",
+        createdAt: "2026-03-10T05:00:00.000Z",
+        expiresAt: "2099-03-10T05:00:06.000Z"
       }
     });
   });

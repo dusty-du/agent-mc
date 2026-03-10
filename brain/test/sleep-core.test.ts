@@ -29,6 +29,7 @@ describe("SleepCore", () => {
       expect(record.overnight.carry_over_commitments).toContain("repair the doorway");
       expect(record.overnight.self_name).toBe("Hazel");
       expect(record.overnight.insights.length).toBeGreaterThan(0);
+      expect(record.overnight.emotional_themes).toContain("resolved");
       expect(record.overnight.personality_profile.seed).toBe("resident-seed");
       expect(Math.abs(record.overnight.personality_profile.traits.openness - sampleBundle().personality_profile.traits.openness)).toBeLessThanOrEqual(0.02);
       expect(await sleepCore.latestOvernight()).toEqual(record.overnight);
@@ -51,6 +52,7 @@ describe("SleepCore", () => {
             summary: "A softer night settled over the doorway.",
             insights: ["Keep the warm threshold ready for tomorrow."],
             risk_themes: ["Skeleton near the tree line."],
+            emotional_themes: ["relieved"],
             place_memories: ["home", "quiet corner"],
             project_memories: ["Doorway Repair: Keep the entrance dry and bright."],
             creative_motifs: ["The doorway looked warm in the rain."]
@@ -70,6 +72,7 @@ describe("SleepCore", () => {
       expect(fetchMock).toHaveBeenCalledOnce();
       expect(JSON.parse(String((request as RequestInit).body)).model).toBe("gpt-sleep-test");
       expect(record.summary).toBe("A softer night settled over the doorway.");
+      expect(record.overnight.emotional_themes).toEqual(["relieved"]);
       expect(record.overnight.project_memories).toEqual(["Doorway Repair: Keep the entrance dry and bright."]);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -83,12 +86,13 @@ describe("SleepCore", () => {
       const sleepCore = new SleepCore(store, {
         modelName: "sleep-test",
         synthesize: vi.fn(async () => ({
-          summary: "Stillness arrived.",
-          insights: "not-an-array" as unknown as string[],
-          risk_themes: [],
-          place_memories: [],
-          project_memories: [],
-          creative_motifs: []
+            summary: "Stillness arrived.",
+            insights: "not-an-array" as unknown as string[],
+            risk_themes: [],
+            emotional_themes: [],
+            place_memories: [],
+            project_memories: [],
+            creative_motifs: []
         }))
       });
 
@@ -245,6 +249,7 @@ function sampleConsolidator(): SleepConsolidator {
       summary: "A careful night gathered the day into memory.",
       insights: ["Keep the doorway warm and ready."],
       risk_themes: ["Skeleton near the tree line."],
+      emotional_themes: ["resolved", "relieved"],
       place_memories: ["home", "quiet corner"],
       project_memories: ["Doorway Repair: Keep the entrance dry and bright."],
       creative_motifs: ["The doorway looked warm in the rain."]

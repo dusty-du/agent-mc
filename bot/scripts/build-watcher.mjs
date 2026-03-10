@@ -24,6 +24,7 @@ await build({
     path: pathShim
   },
   define: {
+    "__dirname": "\"\"",
     "process.platform": "\"browser\"",
     "globalThis.isElectron": "false"
   }

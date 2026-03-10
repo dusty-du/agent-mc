@@ -14,9 +14,12 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.bukkit.Location;
 import org.bukkit.World;
-import org.bukkit.event.entity.EntityDamageEvent;
-import org.bukkit.event.player.PlayerBedEnterEvent;
 import org.bukkit.entity.Player;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
+import org.bukkit.event.player.PlayerBedEnterEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.inventory.ItemStack;
 
 public final class BrainClient {
     private final ResidentPlugin plugin;
@@ -105,15 +108,40 @@ public final class BrainClient {
         return postJson(payload);
     }
 
-    public CompletableFuture<Boolean> postResidentDeath(Player player, String deathMessage) {
+    public CompletableFuture<Boolean> postResidentDeath(PlayerDeathEvent event, String deathMessage) {
+        Player player = event.getPlayer();
         LinkedHashMap<String, Object> payload = basePayload("resident_death", player);
         payload.put("death_message", deathMessage == null ? "" : deathMessage);
+        payload.put("world", buildWorldPayload(player.getWorld()));
+        payload.put("death_location", buildLocationPayload(player.getLocation()));
+        payload.put("dropped_items", buildDroppedItemsPayload(event.getDrops()));
+        payload.put("dropped_stack_count", event.getDrops().size());
+        payload.put("dropped_item_total", countDroppedItems(event.getDrops()));
+        payload.put("keep_inventory", event.getKeepInventory());
+        payload.put("keep_level", event.getKeepLevel());
+        payload.put("new_exp", event.getNewExp());
+        payload.put("new_level", event.getNewLevel());
+        payload.put("new_total_exp", event.getNewTotalExp());
 
         EntityDamageEvent damageEvent = player.getLastDamageCause();
         if (damageEvent != null) {
             payload.put("cause", damageEvent.getCause().name().toLowerCase());
+            payload.put("damage_context", buildDamageContext(damageEvent));
         }
 
+        return postJson(payload);
+    }
+
+    public CompletableFuture<Boolean> postResidentRespawn(PlayerRespawnEvent event) {
+        Player player = event.getPlayer();
+        LinkedHashMap<String, Object> payload = basePayload("resident_respawn", player);
+        payload.put("respawn_location", buildLocationPayload(event.getRespawnLocation()));
+        if (event.getRespawnLocation().getWorld() != null) {
+            payload.put("respawn_world", buildWorldPayload(event.getRespawnLocation().getWorld()));
+        }
+        payload.put("bed_spawn", event.isBedSpawn());
+        payload.put("anchor_spawn", event.isAnchorSpawn());
+        payload.put("respawn_reason", event.getRespawnReason().name().toLowerCase());
         return postJson(payload);
     }
 
@@ -159,18 +187,11 @@ public final class BrainClient {
     private Map<String, Object> buildPlayerPayload(Player player) {
         Location location = player.getLocation();
 
-        LinkedHashMap<String, Object> coordinates = new LinkedHashMap<>();
-        coordinates.put("x", round(location.getX()));
-        coordinates.put("y", round(location.getY()));
-        coordinates.put("z", round(location.getZ()));
-        coordinates.put("yaw", round(location.getYaw()));
-        coordinates.put("pitch", round(location.getPitch()));
-
         LinkedHashMap<String, Object> payload = new LinkedHashMap<>();
         payload.put("uuid", player.getUniqueId().toString());
         payload.put("name", player.getName());
         payload.put("world", player.getWorld().getName());
-        payload.put("location", coordinates);
+        payload.put("location", buildLocationPayload(location));
         return payload;
     }
 
@@ -182,6 +203,50 @@ public final class BrainClient {
         payload.put("time", world.getTime());
         payload.put("full_time", world.getFullTime());
         return payload;
+    }
+
+    private Map<String, Object> buildLocationPayload(Location location) {
+        LinkedHashMap<String, Object> coordinates = new LinkedHashMap<>();
+        coordinates.put("x", round(location.getX()));
+        coordinates.put("y", round(location.getY()));
+        coordinates.put("z", round(location.getZ()));
+        coordinates.put("yaw", round(location.getYaw()));
+        coordinates.put("pitch", round(location.getPitch()));
+        return coordinates;
+    }
+
+    private Map<String, Object> buildDamageContext(EntityDamageEvent damageEvent) {
+        LinkedHashMap<String, Object> payload = new LinkedHashMap<>();
+        payload.put("cause", damageEvent.getCause().name().toLowerCase());
+        payload.put("damage", round(damageEvent.getDamage()));
+        payload.put("final_damage", round(damageEvent.getFinalDamage()));
+        return payload;
+    }
+
+    private Map<String, Object> buildDroppedItemsPayload(Collection<ItemStack> drops) {
+        LinkedHashMap<String, Object> items = new LinkedHashMap<>();
+        for (ItemStack drop : drops) {
+            if (drop == null || drop.getType().isAir() || drop.getAmount() <= 0) {
+                continue;
+            }
+
+            String key = drop.getType().getKey().toString();
+            int total = ((Number) items.getOrDefault(key, 0)).intValue() + drop.getAmount();
+            items.put(key, total);
+        }
+        return items;
+    }
+
+    private int countDroppedItems(Collection<ItemStack> drops) {
+        int total = 0;
+        for (ItemStack drop : drops) {
+            if (drop == null || drop.getType().isAir() || drop.getAmount() <= 0) {
+                continue;
+            }
+
+            total += drop.getAmount();
+        }
+        return total;
     }
 
     private CompletableFuture<Boolean> postJson(Map<String, Object> payload) {

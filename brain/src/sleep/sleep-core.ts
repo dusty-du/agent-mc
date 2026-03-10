@@ -21,6 +21,7 @@ export interface SleepConsolidationResult {
   summary: string;
   insights: string[];
   risk_themes: string[];
+  emotional_themes: string[];
   place_memories: string[];
   project_memories: string[];
   creative_motifs: string[];
@@ -62,6 +63,7 @@ function buildOvernightConsolidation(
     insights: synthesis.insights,
     carry_over_commitments: bundle.carry_over_commitments.slice(-6),
     risk_themes: synthesis.risk_themes,
+    emotional_themes: synthesis.emotional_themes,
     place_memories: synthesis.place_memories,
     project_memories: synthesis.project_memories,
     value_shift_summary: recentSignals,
@@ -161,6 +163,7 @@ function normalizeSleepConsolidationResult(
     summary: normalizeString(result.summary, "summary", model),
     insights: normalizeStringArray(result.insights, 6, "insights", model),
     risk_themes: normalizeStringArray(result.risk_themes, 4, "risk_themes", model),
+    emotional_themes: normalizeOptionalStringArray(result.emotional_themes, 5, "emotional_themes", model),
     place_memories: normalizeStringArray(result.place_memories, 5, "place_memories", model),
     project_memories: normalizeStringArray(result.project_memories, 4, "project_memories", model),
     creative_motifs: normalizeStringArray(result.creative_motifs, 3, "creative_motifs", model)
@@ -179,4 +182,11 @@ function normalizeStringArray(value: unknown, max: number, field: string, model?
     throw new SleepConsolidationError(`Sleep consolidation field "${field}" must be an array.`, model);
   }
   return [...new Set(value.map((entry) => normalizeString(entry, field, model)).filter(Boolean))].slice(0, max);
+}
+
+function normalizeOptionalStringArray(value: unknown, max: number, field: string, model?: string): string[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  return normalizeStringArray(value, max, field, model);
 }

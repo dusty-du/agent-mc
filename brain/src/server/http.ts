@@ -3,6 +3,7 @@ import {
   ActionReport,
   CultureSignal,
   DailyOutcome,
+  InventoryDeltaSummary,
   MemoryObservation,
   ProtectedArea,
   ResidentPresentationSource,
@@ -10,6 +11,7 @@ import {
 } from "@resident/shared";
 import { MemoryManager } from "../memory/memory-manager";
 import { SleepCore } from "../sleep/sleep-core";
+import { ResidentEmotionEvent } from "../emotion-core";
 
 async function readJson<T>(request: IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
@@ -81,6 +83,31 @@ type BrainBridgeEvent =
       };
       death_message?: string;
       cause?: string;
+      world?: {
+        name?: string;
+      };
+      death_location?: { x: number; y: number; z: number };
+      dropped_items?: InventoryDeltaSummary[] | Record<string, number>;
+      dropped_stack_count?: number;
+      dropped_item_total?: number;
+      keep_inventory?: boolean;
+      keep_level?: boolean;
+    }
+  | {
+      type: "resident_respawn";
+      timestamp: string;
+      player: {
+        name: string;
+        world?: string;
+        location?: { x: number; y: number; z: number };
+      };
+      respawn_location?: { x: number; y: number; z: number };
+      respawn_world?: {
+        name?: string;
+      };
+      bed_spawn?: boolean;
+      anchor_spawn?: boolean;
+      respawn_reason?: string;
     }
   | {
       type: "resident_bed_event";
@@ -190,16 +217,32 @@ function eventToObservation(event: BrainBridgeEvent): MemoryObservation {
   }
 
   if (event.type === "resident_death") {
+    const droppedItems = normalizeDroppedItems(event.dropped_items);
+    const inventoryLoss = summarizeDroppedItems(droppedItems);
     return {
       timestamp: event.timestamp,
       category: "danger",
       summary: event.death_message?.trim()
-        ? `I died: ${event.death_message}`
-        : `I died${event.cause ? ` from ${event.cause}` : ""}.`,
-      tags: ["resident", "death", event.cause ?? "unknown-cause"],
+        ? `I died: ${event.death_message}${inventoryLoss ? ` I lost ${inventoryLoss}.` : ""}`
+        : `I died${event.cause ? ` from ${event.cause}` : ""}${inventoryLoss ? ` and lost ${inventoryLoss}` : ""}.`,
+      tags: ["resident", "death", event.cause ?? "unknown-cause", ...droppedItems.map((item) => item.item)],
       importance: 0.95,
       source: "action",
-      location: event.player.location
+      location: event.death_location ?? event.player.location
+    };
+  }
+
+  if (event.type === "resident_respawn") {
+    return {
+      timestamp: event.timestamp,
+      category: "recovery",
+      summary: event.bed_spawn
+        ? "I woke again in a safer place and needed a moment to read the world."
+        : "I came back after dying and had to learn the room around me again.",
+      tags: ["resident", "respawn", event.bed_spawn ? "bed" : event.anchor_spawn ? "anchor" : "wild", event.respawn_reason ?? "unknown-reason"],
+      importance: 0.88,
+      source: "action",
+      location: event.respawn_location ?? event.player.location
     };
   }
 
@@ -282,11 +325,23 @@ export function createResidentBrainServer(
   options: ResidentBrainServerOptions = {}
 ) {
   const emptyPresentationState: ResidentPresentationState = { thought: null };
+  let mirroredPresentationState: ResidentPresentationState = emptyPresentationState;
+
+  const readPresentationState = () =>
+    options.presentation?.getPresentationState() ?? pruneExpiredPresentationState(mirroredPresentationState);
+
   return createServer(async (request: IncomingMessage, response: ServerResponse) => {
     try {
       if (request.method === "GET" && request.url === "/resident/presentation") {
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify(options.presentation?.getPresentationState() ?? emptyPresentationState));
+        response.end(JSON.stringify(readPresentationState()));
+        return;
+      }
+
+      if (request.method === "POST" && request.url === "/resident/presentation") {
+        mirroredPresentationState = pruneExpiredPresentationState(await readJson<ResidentPresentationState>(request));
+        response.writeHead(202, { "content-type": "application/json" });
+        response.end(JSON.stringify(readPresentationState()));
         return;
       }
 
@@ -384,6 +439,9 @@ export function createResidentBrainServer(
               : []
           );
         }
+        if (body.type === "resident_death" || body.type === "resident_respawn") {
+          await memory.applyResidentEmotionEvent(eventToResidentEmotionEvent(body));
+        }
         await memory.remember(eventToObservation(body));
         response.writeHead(202, { "content-type": "application/json" });
         response.end(JSON.stringify({ status: "accepted" }));
@@ -397,4 +455,72 @@ export function createResidentBrainServer(
       response.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
     }
   }).listen(port);
+}
+
+function eventToResidentEmotionEvent(event: Extract<BrainBridgeEvent, { type: "resident_death" | "resident_respawn" }>): ResidentEmotionEvent {
+  if (event.type === "resident_death") {
+    const dropped_items = normalizeDroppedItems(event.dropped_items);
+    return {
+      type: "resident_death",
+      timestamp: event.timestamp,
+      cause_tags: ["death", event.cause ?? "unknown-cause"],
+      death_message: event.death_message,
+      dropped_items,
+      location: event.death_location ?? event.player.location,
+      world: event.world?.name ?? event.player.world
+    };
+  }
+
+  return {
+    type: "resident_respawn",
+    timestamp: event.timestamp,
+    cause_tags: ["respawn", event.respawn_reason ?? (event.bed_spawn ? "bed" : event.anchor_spawn ? "anchor" : "respawn")],
+    respawn_location: event.respawn_location ?? event.player.location,
+    location: event.player.location,
+    world: event.respawn_world?.name ?? event.player.world,
+    bed_spawn: event.bed_spawn
+  };
+}
+
+function normalizeDroppedItems(items: InventoryDeltaSummary[] | Record<string, number> | undefined): InventoryDeltaSummary[] {
+  if (!items) {
+    return [];
+  }
+
+  if (Array.isArray(items)) {
+    return items
+      .filter((item) => item.item && item.count > 0)
+      .map((item) => ({ item: item.item, count: item.count }));
+  }
+
+  return Object.entries(items)
+    .filter(([, count]) => typeof count === "number" && count > 0)
+    .map(([item, count]) => ({ item, count }));
+}
+
+function summarizeDroppedItems(items: InventoryDeltaSummary[] | undefined): string {
+  if (!items || items.length === 0) {
+    return "";
+  }
+
+  return items
+    .slice(0, 3)
+    .map((item) => `${item.count} ${item.item}`)
+    .join(", ");
+}
+
+function pruneExpiredPresentationState(state: ResidentPresentationState, nowMs = Date.now()): ResidentPresentationState {
+  const thought = state?.thought;
+  if (!thought) {
+    return { thought: null };
+  }
+
+  const expiresAtMs = Date.parse(thought.expiresAt);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+    return { thought: null };
+  }
+
+  return {
+    thought: { ...thought }
+  };
 }
