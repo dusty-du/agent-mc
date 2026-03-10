@@ -349,6 +349,69 @@ export interface ValueProfile {
   updatedAt: string;
 }
 
+export type RoutinePhase = "dawn" | "work" | "homeward" | "dusk" | "night";
+
+export type ResidentChronotype = "early" | "steady" | "late";
+
+export type ResidentMotif = "homesteader" | "wanderer" | "caretaker" | "tinkerer" | "sentinel" | "host";
+
+export interface ResidentTraitProfile {
+  openness: number;
+  conscientiousness: number;
+  extraversion: number;
+  agreeableness: number;
+  threat_sensitivity: number;
+}
+
+export interface ResidentPersonalityProfile {
+  seed: string;
+  traits: ResidentTraitProfile;
+  chronotype: ResidentChronotype;
+  motifs: {
+    primary: ResidentMotif;
+    secondary?: ResidentMotif;
+  };
+  style_tags: string[];
+  updated_at: string;
+}
+
+export interface ResidentNeedState {
+  safety: number;
+  rest: number;
+  hunger: number;
+  autonomy: number;
+  competence: number;
+  relatedness: number;
+  beauty: number;
+}
+
+export interface ResidentMindState {
+  valence: number;
+  arousal: number;
+  confidence: number;
+  frustration: number;
+  fatigueDebt: number;
+  routinePhase: RoutinePhase;
+}
+
+export interface BootstrapProgress {
+  woodSecured: boolean;
+  toolsReady: boolean;
+  shelterSecured: boolean;
+  lightSecured: boolean;
+  foodSecured: boolean;
+  bedSecured: boolean;
+}
+
+export interface RecentActionSnapshot {
+  timestamp: string;
+  intent_type: IntentType;
+  target_class: string;
+  status: ActionStatus;
+  position_delta: number;
+  risk_context: "safe" | "exposed" | "threatened" | "sheltered";
+}
+
 export interface CombatPolicy {
   engage_threshold: number;
   retreat_threshold: number;
@@ -393,6 +456,10 @@ export interface WakeOrientation {
 
 export interface MemoryState {
   current_day: number;
+  personality_profile: ResidentPersonalityProfile;
+  need_state: ResidentNeedState;
+  mind_state: ResidentMindState;
+  bootstrap_progress: BootstrapProgress;
   home_anchor?: Vec3;
   known_beds: Vec3[];
   workstation_state: WorkstationState;
@@ -413,6 +480,7 @@ export interface MemoryState {
   recent_observations: MemoryObservation[];
   recent_interactions: string[];
   recent_dangers: string[];
+  recent_action_snapshots: RecentActionSnapshot[];
   place_tags: string[];
   affect: AffectState;
   self_narrative: string[];
@@ -426,11 +494,16 @@ export interface MemoryBundle {
   day_number: number;
   created_at: string;
   summary: string;
+  personality_profile: ResidentPersonalityProfile;
+  need_state: ResidentNeedState;
+  mind_state: ResidentMindState;
+  bootstrap_progress: BootstrapProgress;
   observations: MemoryObservation[];
   active_projects: ProjectState[];
   carry_over_commitments: string[];
   recent_dangers: string[];
   recent_interactions: string[];
+  recent_action_snapshots: RecentActionSnapshot[];
   place_tags: string[];
   final_affect: AffectState;
 }
@@ -461,6 +534,7 @@ export interface OvernightConsolidation {
   day_number: number;
   created_at: string;
   summary: string;
+  personality_profile: ResidentPersonalityProfile;
   insights: string[];
   carry_over_commitments: string[];
   risk_themes: string[];

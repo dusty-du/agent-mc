@@ -1,6 +1,7 @@
 import {
   AgentIntent,
   BuildIntent,
+  COMBAT_ENGAGE_DISTANCE,
   BuildPlan,
   CraftGoal,
   MemoryObservation,
@@ -11,6 +12,7 @@ import {
   RecallQuery,
   ReplanLevel,
   ReplanTrigger,
+  Vec3,
   ValueProfile,
   WakeOrientation
 } from "@resident/shared";
@@ -28,6 +30,16 @@ export interface WakeBrainDecision {
   craftGoal?: CraftGoal;
   buildPlan?: BuildPlan;
   recallQuery?: RecallQuery;
+}
+
+interface SurvivalIntentPlan {
+  intentType: AgentIntent["intent_type"];
+  target?: AgentIntent["target"];
+  reason: string;
+  successConditions: string[];
+  dialogue: string;
+  observation: string;
+  project?: Pick<ProjectState, "title" | "kind" | "status" | "summary" | "location">;
 }
 
 function isoNow(): string {
@@ -133,6 +145,8 @@ export class WakeBrain {
 
     if (frame.combat_state.hostilesNearby > 0) {
       const risk = this.combatRisk(frame);
+      const retreatTarget = frame.safe_route_state.nearestShelter ?? frame.home_state.anchor;
+      const hostileDistance = nearestHostileDistance(frame);
       if (risk > 0.55) {
         observations.push(
           observationFrom(frame, "danger", "Danger is close; safety matters more than pride right now.", ["combat", "retreat", "survival"])
@@ -147,6 +161,54 @@ export class WakeBrain {
             cancel_conditions: ["hostiles no longer present", "safe shelter reached"],
             success_conditions: ["distance from hostiles increases", "shelter reached"],
             dialogue: "I need to fall back and stay alive.",
+            trigger
+          },
+          memory: nextMemory,
+          observations,
+          replanLevel,
+          wakeOrientation
+        };
+      }
+
+      if (hostileDistance !== undefined && hostileDistance > COMBAT_ENGAGE_DISTANCE) {
+        observations.push(
+          observationFrom(
+            frame,
+            "danger",
+            "Distant danger is a reason to stay cautious, not charge downhill into trouble.",
+            ["combat", "distance", "survival"],
+            "perception"
+          )
+        );
+        if (retreatTarget) {
+          return {
+            intent: {
+              agent_id: frame.agent_id,
+              intent_type: "retreat",
+              target: retreatTarget,
+              reason: "Keep distance from danger until a hostile is close enough to matter directly.",
+              priority: 1,
+              cancel_conditions: ["hostiles no longer present", "safe shelter reached"],
+              success_conditions: ["distance from hostiles increases", "shelter reached"],
+              dialogue: "I should keep my distance and stay alive.",
+              trigger
+            },
+            memory: nextMemory,
+            observations,
+            replanLevel,
+            wakeOrientation
+          };
+        }
+
+        return {
+          intent: {
+            agent_id: frame.agent_id,
+            intent_type: "observe",
+            reason: "Watch distant danger instead of rushing into a fight that has not reached me yet.",
+            priority: 1,
+            cancel_conditions: ["hostiles close in", "safe route becomes clear"],
+            success_conditions: ["hostile movement understood", "new safe response chosen"],
+            dialogue: "I need to watch this carefully before I do anything rash.",
             trigger
           },
           memory: nextMemory,
@@ -199,22 +261,29 @@ export class WakeBrain {
       };
     }
 
-    if (frame.hunger <= 8 || frame.pantry_state.emergencyReserveDays < 1) {
+    const survivalIntent = pickSurvivalIntent(frame);
+    if (survivalIntent) {
       observations.push(
-        observationFrom(frame, "food", "Food security needs attention before larger ambitions.", ["food", "survival", "farm"])
+        observationFrom(
+          frame,
+          "food",
+          survivalIntent.observation,
+          ["food", "survival", survivalIntent.intentType === "move" ? "bootstrap" : survivalIntent.intentType]
+        )
       );
       return {
         intent: {
           agent_id: frame.agent_id,
-          intent_type: hasKnownFood(frame.inventory) ? "eat" : "farm",
-          reason: "Preserve calories, recover stability, and protect tomorrow.",
+          intent_type: survivalIntent.intentType,
+          target: survivalIntent.target,
+          reason: survivalIntent.reason,
           priority: 1,
           cancel_conditions: ["hunger restored", "new immediate danger appears"],
-          success_conditions: ["safe meal consumed or food source secured"],
-          dialogue: "I should feed myself before doing anything reckless.",
+          success_conditions: survivalIntent.successConditions,
+          dialogue: survivalIntent.dialogue,
           trigger
         },
-        memory: nextMemory,
+        memory: survivalIntent.project ? rememberProject(nextMemory, survivalIntent.project) : nextMemory,
         observations,
         replanLevel,
         wakeOrientation
@@ -392,6 +461,36 @@ export class WakeBrain {
         replanLevel,
         wakeOrientation,
         craftGoal: nextCraft
+      };
+    }
+
+    const bootstrapIntent = pickBootstrapIntent(frame);
+    if (needsBootstrapMaterials(frame) && bootstrapIntent) {
+      observations.push(
+        observationFrom(
+          frame,
+          "project",
+          "I need starter materials before I can turn this place into a real home.",
+          ["bootstrap", "materials", "survival"],
+          "reflection"
+        )
+      );
+      return {
+        intent: {
+          agent_id: frame.agent_id,
+          intent_type: bootstrapIntent.intentType,
+          target: bootstrapIntent.target,
+          reason: bootstrapIntent.reason,
+          priority: 3,
+          cancel_conditions: ["danger appears", "night falls too close"],
+          success_conditions: bootstrapIntent.successConditions,
+          dialogue: bootstrapIntent.dialogue,
+          trigger
+        },
+        memory: bootstrapIntent.project ? rememberProject(nextMemory, bootstrapIntent.project) : nextMemory,
+        observations,
+        replanLevel,
+        wakeOrientation
       };
     }
 
@@ -583,6 +682,59 @@ export class WakeBrain {
   }
 }
 
+function nearestHostileDistance(frame: PerceptionFrame): number | undefined {
+  return frame.nearby_entities
+    .filter((entity) => entity.type === "hostile")
+    .map((entity) => entity.distance)
+    .sort((left, right) => left - right)[0];
+}
+
+function pickSurvivalIntent(frame: PerceptionFrame): SurvivalIntentPlan | undefined {
+  if (frame.hunger > 8 && frame.pantry_state.emergencyReserveDays >= 1) {
+    return undefined;
+  }
+
+  if (hasKnownFood(frame.inventory)) {
+    return {
+      intentType: "eat",
+      reason: "Preserve calories, recover stability, and protect tomorrow.",
+      successConditions: ["safe meal consumed or food source secured"],
+      dialogue: "I should feed myself before doing anything reckless.",
+      observation: "Food security needs attention before larger ambitions."
+    };
+  }
+
+  if (hasNearbyFarmOpportunity(frame)) {
+    return {
+      intentType: "farm",
+      reason: "Food systems deserve steady care, especially when reserves are thin.",
+      successConditions: ["crops harvested, planted, or farmland improved"],
+      dialogue: "I should tend the fields before hunger turns into panic.",
+      observation: "Food security needs attention before larger ambitions.",
+      project: {
+        title: "Keep the fields alive",
+        kind: "farm",
+        status: "active",
+        summary: "Food grows through repeated care.",
+        location: frame.home_state.anchor ?? frame.position
+      }
+    };
+  }
+
+  const bootstrapIntent = pickBootstrapIntent(frame);
+  if (bootstrapIntent) {
+    return bootstrapIntent;
+  }
+
+  return {
+    intentType: "observe",
+    reason: "Pause briefly and reassess because no immediate food or movement opportunity is visible yet.",
+    successConditions: ["a safer next step becomes clear"],
+    dialogue: "I need to look carefully before I commit myself.",
+    observation: "The immediate area offers no obvious food path, so a careful pause is wiser than pretending otherwise."
+  };
+}
+
 function hasKnownFood(inventory: Record<string, number>): boolean {
   return countItems(inventory, ["bread", "baked_potato", "cooked_beef", "cooked_mutton", "cooked_porkchop", "cooked_chicken", "carrot", "apple"]) > 0;
 }
@@ -592,14 +744,25 @@ function shouldStore(frame: PerceptionFrame): boolean {
 }
 
 function shouldFarm(frame: PerceptionFrame): boolean {
+  if (frame.hunger <= 8 || frame.pantry_state.emergencyReserveDays < 1) {
+    return false;
+  }
+  return hasNearbyFarmOpportunity(frame);
+}
+
+function hasNearbyFarmOpportunity(frame: PerceptionFrame): boolean {
   return (
     frame.farm_state.harvestableTiles > 0 ||
     (frame.pantry_state.emergencyReserveDays < 2 &&
-      (frame.farm_state.farmlandReady || Object.values(frame.farm_state.seedStock).some((count) => count > 0)))
+      Object.values(frame.farm_state.seedStock).some((count) => count > 0) &&
+      (frame.farm_state.farmlandReady || frame.farm_state.hydratedTiles > 0))
   );
 }
 
 function shouldTendLivestock(frame: PerceptionFrame): boolean {
+  if (!frame.nearby_entities.some((entity) => entity.type === "passive")) {
+    return false;
+  }
   if (frame.livestock_state.welfareFlags.length > 0) {
     return true;
   }
@@ -634,7 +797,11 @@ function pickDelightMove(
   values: ValueProfile,
   memory: MemoryState
 ): { target: { x: number; y: number; z: number }; reason: string; dialogue: string; summary: string } | undefined {
-  const affordance = frame.terrain_affordances?.find((entry) => entry.type === "view" || entry.type === "water" || entry.type === "cave");
+  const affordance = frame.terrain_affordances?.find(
+    (entry) =>
+      (entry.type === "view" || entry.type === "water" || entry.type === "cave") &&
+      distanceSquared(frame.position, entry.location) > 9
+  );
   if (!affordance || (values.curiosity < 0.58 && values.beauty < 0.52 && values.joy < 0.7)) {
     return undefined;
   }
@@ -646,6 +813,113 @@ function pickDelightMove(
     reason: `Make room for curiosity and lived beauty at the ${affordance.type}.`,
     dialogue: `I want to see what the ${affordance.type} feels like up close.`,
     summary: `A small act of curiosity feels worthwhile: visit the ${affordance.type}.`
+  };
+}
+
+function pickBootstrapIntent(frame: PerceptionFrame): SurvivalIntentPlan | undefined {
+  const treeAffordance = nearestAffordance(frame, ["tree"]);
+  if (treeAffordance) {
+    return {
+      intentType: "gather",
+      target: "wood",
+      reason: "Gather wood first so shelter, tools, and food systems are actually possible.",
+      successConditions: ["wood collected for basic survival work"],
+      dialogue: "I need wood before this place can start feeling livable.",
+      observation: "I need materials before food security and shelter can take shape.",
+      project: {
+        title: "Bootstrap the basics",
+        kind: "explore",
+        status: "active",
+        summary: "Gather the first materials needed for food and shelter.",
+        location: treeAffordance.location
+      }
+    };
+  }
+
+  const scoutTarget = pickScoutTarget(frame);
+  if (!scoutTarget) {
+    return undefined;
+  }
+
+  return {
+    intentType: "move",
+    target: scoutTarget.location,
+    reason: `Move toward ${scoutTarget.label} to find better ground for food and shelter.`,
+    successConditions: ["reached a more promising place to continue surviving"],
+    dialogue: `I should head toward the ${scoutTarget.label} and see what it offers.`,
+    observation: "Standing still will not solve food security; I need a better place to work from.",
+    project: {
+      title: "Scout a better foothold",
+      kind: "explore",
+      status: "active",
+      summary: `Look for a more promising place near the ${scoutTarget.label}.`,
+      location: scoutTarget.location
+    }
+  };
+}
+
+function needsBootstrapMaterials(frame: PerceptionFrame): boolean {
+  if (frame.home_state.shelterScore >= 0.55 && frame.home_state.anchor) {
+    return false;
+  }
+
+  return countItems(frame.inventory, [
+    "oak_log",
+    "spruce_log",
+    "birch_log",
+    "jungle_log",
+    "acacia_log",
+    "dark_oak_log",
+    "mangrove_log",
+    "cherry_log",
+    "oak_planks",
+    "spruce_planks",
+    "birch_planks",
+    "jungle_planks",
+    "acacia_planks",
+    "dark_oak_planks",
+    "mangrove_planks",
+    "cherry_planks",
+    "cobblestone",
+    "dirt",
+    "torch"
+  ]) < 8;
+}
+
+function nearestAffordance(
+  frame: PerceptionFrame,
+  types: Array<NonNullable<PerceptionFrame["terrain_affordances"]>[number]["type"]>
+) {
+  return frame.terrain_affordances
+    ?.filter((entry) => types.includes(entry.type))
+    .sort((left, right) => distanceSquared(frame.position, left.location) - distanceSquared(frame.position, right.location))[0];
+}
+
+function pickScoutTarget(frame: PerceptionFrame): { location: Vec3; label: string } | undefined {
+  const candidateAffordance = frame.terrain_affordances
+    ?.filter((entry) => entry.type !== "hazard" && entry.type !== "cave")
+    .sort((left, right) => distanceSquared(frame.position, right.location) - distanceSquared(frame.position, left.location))
+    .find((entry) => distanceSquared(frame.position, entry.location) > 9);
+
+  if (candidateAffordance) {
+    return {
+      location: candidateAffordance.location,
+      label: candidateAffordance.type
+    };
+  }
+
+  const candidateBlock = frame.nearby_blocks
+    .filter((block) => !block.name.includes("air"))
+    .sort((left, right) => right.distance - left.distance)
+    .find((block) => distanceSquared(frame.position, block.position) > 9);
+
+  if (!candidateBlock) {
+    return undefined;
+  }
+
+  return {
+    location: candidateBlock.position,
+    label: candidateBlock.name.replace(/_/g, " ")
   };
 }
 

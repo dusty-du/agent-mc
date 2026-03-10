@@ -1,4 +1,6 @@
-import { CombatPolicy, LivestockState, ValueProfile } from "./contracts";
+import { BootstrapProgress, CombatPolicy, LivestockState, ResidentMindState, ResidentNeedState, ValueProfile } from "./contracts";
+
+export const COMBAT_ENGAGE_DISTANCE = 14;
 
 export const DEFAULT_VALUE_PROFILE: ValueProfile = {
   survival: 0.95,
@@ -35,6 +37,34 @@ export const DEFAULT_COMBAT_POLICY: CombatPolicy = {
     "re-equip best weapon and shield",
     "wait for health and danger to stabilize"
   ]
+};
+
+export const DEFAULT_NEED_STATE: ResidentNeedState = {
+  safety: 0.45,
+  rest: 0.25,
+  hunger: 0.2,
+  autonomy: 0.45,
+  competence: 0.4,
+  relatedness: 0.3,
+  beauty: 0.35
+};
+
+export const DEFAULT_MIND_STATE: ResidentMindState = {
+  valence: 0.55,
+  arousal: 0.35,
+  confidence: 0.45,
+  frustration: 0.15,
+  fatigueDebt: 0.2,
+  routinePhase: "dawn"
+};
+
+export const DEFAULT_BOOTSTRAP_PROGRESS: BootstrapProgress = {
+  woodSecured: false,
+  toolsReady: false,
+  shelterSecured: false,
+  lightSecured: false,
+  foodSecured: false,
+  bedSecured: false
 };
 
 export const DEFAULT_LIVESTOCK_STATE: LivestockState = {

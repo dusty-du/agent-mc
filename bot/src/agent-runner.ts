@@ -373,6 +373,9 @@ function classifyTrigger(
   if (report?.status === "failed") {
     return "task_failure";
   }
+  if (report?.needs_replan) {
+    return "task_failure";
+  }
   if (current.combat_state.hostilesNearby > 0 && previous.combat_state.hostilesNearby === 0) {
     return "hostile_detection";
   }

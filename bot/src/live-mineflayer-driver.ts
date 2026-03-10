@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { Bot, createBot } from "mineflayer";
-import { ActionReport, AgentIntent, BuildPlan, CraftGoal, PerceptionFrame, SiteArea, Vec3, WeatherState } from "@resident/shared";
+import { ActionReport, AgentIntent, BuildPlan, COMBAT_ENGAGE_DISTANCE, CraftGoal, PerceptionFrame, SiteArea, Vec3, WeatherState } from "@resident/shared";
 import { IntentExecutionContext } from "./resident-bot";
 
 type GoalNearCtor = new (x: number, y: number, z: number, range: number) => unknown;
@@ -246,7 +246,9 @@ export class LiveMineflayerDriver {
         case "recover":
           return this.recover(bot);
         case "socialize": {
-          const nearbyPlayer = Object.values(bot.entities).find((entity) => inferEntityType(entity.username ?? entity.name ?? "", entity.type) === "player");
+          const nearbyPlayer = Object.values(bot.entities).find(
+            (entity) => entity.id !== bot.entity.id && inferEntityType(entity.username ?? entity.name ?? "", entity.type) === "player"
+          );
           if (nearbyPlayer?.position) {
             await bot.lookAt(nearbyPlayer.position);
           }
@@ -813,6 +815,15 @@ export class LiveMineflayerDriver {
     if (!hostile) {
       return report("fight", "blocked", ["No hostile target is close enough to engage."], true);
     }
+    const distance = bot.entity.position.distanceTo(hostile.position);
+    if (distance > COMBAT_ENGAGE_DISTANCE) {
+      return report(
+        "fight",
+        "blocked",
+        [`Detected ${hostile.name ?? "a hostile"}, but it is still outside melee range.`],
+        true
+      );
+    }
     if (bot.health <= 8) {
       return report("fight", "partial", ["Too hurt to commit fully; retreat would be wiser."], true);
     }
@@ -824,17 +835,38 @@ export class LiveMineflayerDriver {
 
     const startingHealth = bot.health;
     let swings = 0;
-    while (hostile.isValid !== false && swings < 8 && bot.health > 6 && bot.entity.position.distanceTo(hostile.position) <= 14) {
+    while (
+      hostile.isValid !== false &&
+      swings < 8 &&
+      bot.health > 6 &&
+      bot.entity.position.distanceTo(hostile.position) <= COMBAT_ENGAGE_DISTANCE
+    ) {
       await this.moveNear(bot, toSharedVec(hostile.position), 2);
       await bot.attack(hostile);
       swings += 1;
       await delay(325);
     }
 
+    if (swings === 0) {
+      return report(
+        "fight",
+        "blocked",
+        [`Could not reach ${hostile.name ?? "the hostile"} to engage safely.`],
+        true,
+        {},
+        [],
+        Math.max(0, startingHealth - bot.health)
+      );
+    }
+
     return report(
       "fight",
-      swings > 0 ? "completed" : "partial",
-      [`Fought ${hostile.name ?? "hostile"} cautiously.`],
+      hostile.isValid === false ? "completed" : "partial",
+      [
+        hostile.isValid === false
+          ? `Fought ${hostile.name ?? "hostile"} cautiously and ended the immediate threat.`
+          : `Fought ${hostile.name ?? "hostile"} cautiously, but the threat remains.`
+      ],
       hostile.isValid !== false,
       {},
       [],
@@ -1238,7 +1270,9 @@ function inferShelterScore(blocks: Array<{ name: string }>): number {
 }
 
 function describeNearby(bot: Bot): string {
-  const player = Object.values(bot.entities).find((entity) => inferEntityType(entity.username ?? entity.name ?? "", entity.type) === "player");
+  const player = Object.values(bot.entities).find(
+    (entity) => entity.id !== bot.entity.id && inferEntityType(entity.username ?? entity.name ?? "", entity.type) === "player"
+  );
   const view = bot.findBlock({ matching: (block: { name: string }) => !block.name.includes("air"), maxDistance: 6 });
   if (player) {
     return `I notice ${player.username ?? player.name ?? "someone"} nearby.`;

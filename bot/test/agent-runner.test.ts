@@ -204,6 +204,112 @@ describe("ResidentAgentRunner", () => {
       })
     );
   });
+
+  it("turns replan-needed reports into task_failure on the next planning turn", async () => {
+    const { ResidentAgentRunner } = await import("../src/agent-runner");
+    const baseMemory = createMemory();
+    const perception = {
+      ...createPerception(),
+      nearby_entities: [
+        {
+          id: "hostile-1",
+          name: "zombie",
+          type: "hostile",
+          distance: 18
+        }
+      ],
+      combat_state: {
+        hostilesNearby: 1,
+        strongestThreat: "zombie",
+        armorScore: 0,
+        weaponTier: "none",
+        escapeRouteKnown: true
+      }
+    };
+    let runner: InstanceType<typeof ResidentAgentRunner> | undefined;
+
+    driverConnect.mockResolvedValue(undefined);
+    sleepLatestOvernight.mockResolvedValue(undefined);
+    sleepCurrentValues.mockResolvedValue(DEFAULT_VALUE_PROFILE);
+    memorySyncPerception.mockResolvedValue(baseMemory);
+    memoryPendingSleepWork.mockResolvedValue([]);
+    memoryCurrent.mockResolvedValue(baseMemory);
+    memoryReplace.mockResolvedValue(baseMemory);
+    memoryRemember.mockResolvedValue(baseMemory);
+    memoryRememberReport.mockResolvedValue(baseMemory);
+    executiveDecide
+      .mockResolvedValueOnce({
+        intent: {
+          agent_id: "resident-1",
+          intent_type: "fight",
+          reason: "stay safe",
+          priority: 2,
+          cancel_conditions: [],
+          success_conditions: [],
+          trigger: "hostile_detection"
+        },
+        memory: baseMemory,
+        observations: [],
+        replanLevel: "hard"
+      })
+      .mockResolvedValueOnce({
+        intent: {
+          agent_id: "resident-1",
+          intent_type: "observe",
+          reason: "reassess",
+          priority: 1,
+          cancel_conditions: [],
+          success_conditions: [],
+          trigger: "task_failure"
+        },
+        memory: baseMemory,
+        observations: [],
+        replanLevel: "hard"
+      });
+    runtimeTick
+      .mockResolvedValueOnce({ perception })
+      .mockResolvedValueOnce({
+        perception,
+        report: {
+          intent_type: "fight",
+          status: "blocked",
+          notes: ["Detected zombie, but it is still outside melee range."],
+          damage_taken: 0,
+          inventory_delta: {},
+          world_delta: [],
+          needs_replan: true
+        }
+      })
+      .mockImplementationOnce(async () => {
+        runner?.stop();
+        return {
+          perception,
+          report: {
+            intent_type: "observe",
+            status: "completed",
+            notes: [],
+            damage_taken: 0,
+            inventory_delta: {},
+            world_delta: [],
+            needs_replan: false
+          }
+        };
+      });
+
+    runner = new ResidentAgentRunner({
+      host: "127.0.0.1",
+      port: 25565,
+      username: "resident-1",
+      auth: "offline",
+      serveBrain: false,
+      intervalMs: 0
+    });
+
+    await runner.run();
+
+    expect(executiveDecide).toHaveBeenCalledTimes(2);
+    expect(executiveDecide.mock.calls[1]?.[4]).toBe("task_failure");
+  });
 });
 
 function createMemory(): MemoryState {
