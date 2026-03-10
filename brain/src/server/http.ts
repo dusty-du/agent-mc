@@ -1,5 +1,13 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
-import { ActionReport, CultureSignal, DailyOutcome, MemoryObservation, ProtectedArea } from "@resident/shared";
+import {
+  ActionReport,
+  CultureSignal,
+  DailyOutcome,
+  MemoryObservation,
+  ProtectedArea,
+  ResidentPresentationSource,
+  ResidentPresentationState
+} from "@resident/shared";
 import { MemoryManager } from "../memory/memory-manager";
 import { SleepCore } from "../sleep/sleep-core";
 
@@ -109,6 +117,10 @@ type BrainBridgeEvent =
       storming: boolean;
       thundering: boolean;
     };
+
+export interface ResidentBrainServerOptions {
+  presentation?: ResidentPresentationSource;
+}
 
 function inferCultureSignalFromMessage(playerName: string, message: string, timestamp: string): CultureSignal {
   const lower = message.toLowerCase();
@@ -263,9 +275,21 @@ function eventToObservation(event: BrainBridgeEvent): MemoryObservation {
   };
 }
 
-export function createResidentBrainServer(memory: MemoryManager, sleepCore: SleepCore, port = 4318) {
+export function createResidentBrainServer(
+  memory: MemoryManager,
+  sleepCore: SleepCore,
+  port = 4318,
+  options: ResidentBrainServerOptions = {}
+) {
+  const emptyPresentationState: ResidentPresentationState = { thought: null };
   return createServer(async (request: IncomingMessage, response: ServerResponse) => {
     try {
+      if (request.method === "GET" && request.url === "/resident/presentation") {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(options.presentation?.getPresentationState() ?? emptyPresentationState));
+        return;
+      }
+
       if (request.method === "GET" && request.url === "/health") {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify({ ok: true }));

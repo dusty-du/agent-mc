@@ -87,19 +87,37 @@ describe("WakeBrain combat decisions", () => {
     expect(decision.intent.intent_type).toBe("retreat");
   });
 
-  it("observes distant hostiles when no retreat target is known", () => {
+  it("keeps moving toward a better foothold when distant hostiles are present but no retreat target is known", () => {
     const decision = new WakeBrain().decide(
       withHostile(
         {
           ...basePerception,
+          inventory: {},
           home_state: {
             ...basePerception.home_state,
-            anchor: undefined
+            anchor: undefined,
+            shelterScore: 0.2,
+            bedAvailable: false,
+            workshopReady: false
           },
           safe_route_state: {
             homeRouteKnown: false,
             nearestShelter: undefined,
             nightSafeRadius: 24
+          },
+          terrain_affordances: [
+            {
+              type: "water",
+              location: { x: 12, y: 64, z: 0 },
+              note: "Water nearby for farming or quiet reflection."
+            }
+          ],
+          pantry_state: {
+            ...basePerception.pantry_state,
+            carriedCalories: 0,
+            pantryCalories: 0,
+            cookedMeals: 0,
+            emergencyReserveDays: 0
           }
         },
         COMBAT_ENGAGE_DISTANCE + 4
@@ -110,7 +128,8 @@ describe("WakeBrain combat decisions", () => {
       "hostile_detection"
     );
 
-    expect(decision.intent.intent_type).toBe("observe");
+    expect(decision.intent.intent_type).toBe("move");
+    expect(decision.intent.target).toEqual({ x: 12, y: 64, z: 0 });
   });
 
   it("fights only when a hostile is already within engage range and risk is acceptable", () => {

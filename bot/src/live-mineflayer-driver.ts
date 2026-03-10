@@ -2,12 +2,15 @@ import { setTimeout as delay } from "node:timers/promises";
 import { Bot, createBot } from "mineflayer";
 import { ActionReport, AgentIntent, BuildPlan, COMBAT_ENGAGE_DISTANCE, CraftGoal, PerceptionFrame, SiteArea, Vec3, WeatherState } from "@resident/shared";
 import { IntentExecutionContext } from "./resident-bot";
+import { ResidentPresentationController } from "./presentation-state";
+import { ResidentWatcherServer } from "./watcher-server";
 
 type GoalNearCtor = new (x: number, y: number, z: number, range: number) => unknown;
 type BotBlock = NonNullable<ReturnType<Bot["blockAt"]>>;
 type BotBlockMaybe = ReturnType<Bot["blockAt"]>;
 type BotItem = ReturnType<Bot["inventory"]["items"]>[number];
 type BotEntity = Bot["entities"][number];
+const INTENT_EXECUTION_TIMEOUT_MS = 15_000;
 
 export interface LiveMineflayerDriverConfig {
   host: string;
@@ -16,13 +19,18 @@ export interface LiveMineflayerDriverConfig {
   version?: string;
   auth?: "offline" | "microsoft";
   viewerPort?: number;
+  presentation?: ResidentPresentationController;
 }
 
 export class LiveMineflayerDriver {
   private bot?: Bot;
   private GoalNear?: GoalNearCtor;
+  private watcherServer?: ResidentWatcherServer;
+  private readonly presentation: ResidentPresentationController;
 
-  constructor(private readonly config: LiveMineflayerDriverConfig) {}
+  constructor(private readonly config: LiveMineflayerDriverConfig) {
+    this.presentation = config.presentation ?? new ResidentPresentationController();
+  }
 
   async connect(): Promise<Bot> {
     const bot = createBot({
@@ -34,20 +42,19 @@ export class LiveMineflayerDriver {
     });
 
     const pathfinderModule = require("mineflayer-pathfinder");
-    const collectBlockModule = require("mineflayer-collectblock");
 
     bot.loadPlugin(pathfinderModule.pathfinder);
-    bot.loadPlugin(collectBlockModule.plugin);
     this.GoalNear = pathfinderModule.goals.GoalNear as GoalNearCtor;
 
     await onceSpawn(bot);
 
     if (this.config.viewerPort) {
-      const viewerModule = require("prismarine-viewer");
-      viewerModule.mineflayer(bot, {
+      this.watcherServer = new ResidentWatcherServer(bot, {
         port: this.config.viewerPort,
-        firstPerson: false
+        firstPerson: false,
+        presentation: this.presentation
       });
+      await this.watcherServer.start();
     }
     this.bot = bot;
     return bot;
@@ -208,60 +215,62 @@ export class LiveMineflayerDriver {
     const bot = this.requireBot();
 
     try {
-      if (intent.intent_type === "move" || intent.intent_type === "retreat") {
-        const target = this.resolveTarget(bot, intent.target);
-        if (!target) {
-          return report(intent.intent_type, "blocked", ["No reachable movement target was available."], true);
+      return await this.withIntentDeadline(bot, intent.intent_type, async () => {
+        if (intent.intent_type === "move" || intent.intent_type === "retreat") {
+          const target = this.resolveTarget(bot, intent.target);
+          if (!target) {
+            return report(intent.intent_type, "blocked", ["No reachable movement target was available."], true);
+          }
+          await this.moveTo(bot, target);
+          return report(intent.intent_type, "completed", ["Moved to target location."], false);
         }
-        await this.moveTo(bot, target);
-        return report(intent.intent_type, "completed", ["Moved to target location."], false);
-      }
 
-      switch (intent.intent_type) {
-        case "sleep":
-          return this.sleepOrMove(bot, intent);
-        case "eat":
-          return this.consumeFood(bot);
-        case "craft":
-          return context?.craftGoal ? this.executeCraftGoal(bot, context.craftGoal) : report("craft", "blocked", ["No craft goal provided."], true);
-        case "smelt":
-          return this.smeltUsefulItem(bot, typeof intent.target === "string" ? intent.target : undefined);
-        case "gather":
-        case "mine":
-          return this.executeGatherOrMine(bot, typeof intent.target === "string" ? intent.target : undefined, intent.intent_type);
-        case "store":
-          return this.storeItems(bot);
-        case "farm":
-          return this.farmNearby(bot);
-        case "tend_livestock":
-          return this.tendLivestock(bot);
-        case "build":
-        case "rebuild":
-        case "repair":
-          return context?.buildPlan
-            ? this.executeBuildPlan(bot, context.buildPlan, intent.intent_type)
-            : report(intent.intent_type, "blocked", ["No build plan was provided."], true);
-        case "fight":
-          return this.fightNearestHostile(bot);
-        case "recover":
-          return this.recover(bot);
-        case "socialize": {
-          const nearbyPlayer = Object.values(bot.entities).find(
-            (entity) => entity.id !== bot.entity.id && inferEntityType(entity.username ?? entity.name ?? "", entity.type) === "player"
-          );
-          if (nearbyPlayer?.position) {
-            await bot.lookAt(nearbyPlayer.position);
+        switch (intent.intent_type) {
+          case "sleep":
+            return this.sleepOrMove(bot, intent);
+          case "eat":
+            return this.consumeFood(bot);
+          case "craft":
+            return context?.craftGoal ? this.executeCraftGoal(bot, context.craftGoal) : report("craft", "blocked", ["No craft goal provided."], true);
+          case "smelt":
+            return this.smeltUsefulItem(bot, typeof intent.target === "string" ? intent.target : undefined);
+          case "gather":
+          case "mine":
+            return this.executeGatherOrMine(bot, typeof intent.target === "string" ? intent.target : undefined, intent.intent_type);
+          case "store":
+            return this.storeItems(bot);
+          case "farm":
+            return this.farmNearby(bot);
+          case "tend_livestock":
+            return this.tendLivestock(bot);
+          case "build":
+          case "rebuild":
+          case "repair":
+            return context?.buildPlan
+              ? this.executeBuildPlan(bot, context.buildPlan, intent.intent_type)
+              : report(intent.intent_type, "blocked", ["No build plan was provided."], true);
+          case "fight":
+            return this.fightNearestHostile(bot);
+          case "recover":
+            return this.recover(bot);
+          case "socialize": {
+            const nearbyPlayer = Object.values(bot.entities).find(
+              (entity) => entity.id !== bot.entity.id && inferEntityType(entity.username ?? entity.name ?? "", entity.type) === "player"
+            );
+            if (nearbyPlayer?.position) {
+              await bot.lookAt(nearbyPlayer.position);
+            }
+            if (intent.dialogue) {
+              bot.chat(intent.dialogue);
+            }
+            return report("socialize", "completed", [intent.dialogue ?? "Shared a quiet moment."], false);
           }
-          if (intent.dialogue) {
-            bot.chat(intent.dialogue);
-          }
-          return report("socialize", "completed", [intent.dialogue ?? "Shared a quiet moment."], false);
+          case "observe":
+            return report("observe", "completed", [describeNearby(bot)], false);
+          default:
+            return report(intent.intent_type, "blocked", ["Intent executor not implemented yet."], true);
         }
-        case "observe":
-          return report("observe", "completed", [describeNearby(bot)], false);
-        default:
-          return report(intent.intent_type, "blocked", ["Intent executor not implemented yet."], true);
-      }
+      });
     } catch (error) {
       return report(intent.intent_type, "failed", [error instanceof Error ? error.message : String(error)], true);
     }
@@ -292,6 +301,45 @@ export class LiveMineflayerDriver {
       return;
     }
     await this.moveTo(bot, target);
+  }
+
+  private async withIntentDeadline<T>(bot: Bot, intentType: AgentIntent["intent_type"], task: () => Promise<T>): Promise<T> {
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.stopActivePathing(bot);
+        reject(new Error(`${intentType} timed out while waiting on navigation.`));
+      }, INTENT_EXECUTION_TIMEOUT_MS);
+
+      Promise.resolve()
+        .then(task)
+        .then((value) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        })
+        .catch((error) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        });
+    });
+  }
+
+  private stopActivePathing(bot: Bot): void {
+    try {
+      (bot as any).pathfinder?.stop?.();
+    } catch {}
   }
 
   private async sleepOrMove(bot: Bot, intent: AgentIntent): Promise<ActionReport> {
@@ -434,12 +482,6 @@ export class LiveMineflayerDriver {
     const tool = bestToolForBlock(bot, block.name);
     if (tool) {
       await bot.equip(tool, "hand");
-    }
-
-    const collector = (bot as any).collectBlock;
-    if (collector?.collect) {
-      await collector.collect(block);
-      return report(intentType, "completed", [`Collected ${block.name}.`], false);
     }
 
     await this.moveNear(bot, toSharedVec(block.position), 2);

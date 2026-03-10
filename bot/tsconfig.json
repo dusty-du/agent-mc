@@ -2,11 +2,15 @@
   "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "composite": true,
+    "baseUrl": ".",
     "rootDir": "src",
     "outDir": "dist",
     "paths": {
+      "@resident/brain": [
+        "../brain/src/index.ts"
+      ],
       "@resident/shared": [
-        "../shared/src"
+        "../shared/src/index.ts"
       ]
     }
   },

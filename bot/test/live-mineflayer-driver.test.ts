@@ -1,20 +1,36 @@
 import { EventEmitter } from "node:events";
 import Module from "node:module";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COMBAT_ENGAGE_DISTANCE } from "@resident/shared";
 
 const createBot = vi.fn();
-const mineflayerViewer = vi.fn();
 const pathfinderPlugin = Symbol("pathfinder");
-const collectBlockPlugin = Symbol("collect-block");
+const watcherServerCtor = vi.fn();
+const watcherServerStart = vi.fn();
 
 vi.mock("mineflayer", () => ({
   createBot
 }));
 
+vi.mock("../src/watcher-server", () => ({
+  ResidentWatcherServer: class {
+    constructor(...args: unknown[]) {
+      watcherServerCtor(...args);
+    }
+
+    start = watcherServerStart;
+    close = vi.fn();
+  }
+}));
+
 describe("LiveMineflayerDriver", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    watcherServerStart.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("starts the viewer after spawn in third-person mode", async () => {
@@ -26,16 +42,6 @@ describe("LiveMineflayerDriver", () => {
           goals: {
             GoalNear: class GoalNear {}
           }
-        };
-      }
-      if (id === "mineflayer-collectblock") {
-        return {
-          plugin: collectBlockPlugin
-        };
-      }
-      if (id === "prismarine-viewer") {
-        return {
-          mineflayer: mineflayerViewer
         };
       }
       return originalRequire.call(this, id);
@@ -55,7 +61,7 @@ describe("LiveMineflayerDriver", () => {
 
     const connectPromise = driver.connect();
 
-    expect(mineflayerViewer).not.toHaveBeenCalled();
+    expect(watcherServerStart).not.toHaveBeenCalled();
 
     bot.entity = {
       position: { x: 0, y: 64, z: 0 },
@@ -66,12 +72,17 @@ describe("LiveMineflayerDriver", () => {
 
     await expect(connectPromise).resolves.toBe(bot);
     requireSpy.mockRestore();
-    expect(bot.loadPlugin).toHaveBeenNthCalledWith(1, pathfinderPlugin);
-    expect(bot.loadPlugin).toHaveBeenNthCalledWith(2, collectBlockPlugin);
-    expect(mineflayerViewer).toHaveBeenCalledWith(bot, {
-      port: 3000,
-      firstPerson: false
-    });
+    expect(bot.loadPlugin).toHaveBeenCalledOnce();
+    expect(bot.loadPlugin).toHaveBeenCalledWith(pathfinderPlugin);
+    expect(watcherServerCtor).toHaveBeenCalledWith(
+      bot,
+      expect.objectContaining({
+        port: 3000,
+        firstPerson: false,
+        presentation: expect.any(Object)
+      })
+    );
+    expect(watcherServerStart).toHaveBeenCalledOnce();
   });
 
   it("blocks fight intent when the nearest hostile is outside melee range", async () => {
@@ -177,6 +188,93 @@ describe("LiveMineflayerDriver", () => {
     expect(report.status).toBe("completed");
     expect(report.notes[0]).toBe("I pause and take in the quiet of the world around me.");
   });
+
+  it("returns a failed gather report when pathfinding times out instead of hanging the driver", async () => {
+    const { driver, bot, requireSpy } = await connectFightHarness((hostile) => hostile);
+    const timeoutError = new Error("Took to long to decide path to goal!");
+
+    bot.findBlock = vi.fn(() => ({
+      name: "oak_log",
+      position: { x: 4, y: 64, z: 0 }
+    }));
+    bot.pathfinder.goto.mockRejectedValueOnce(timeoutError);
+    bot.dig = vi.fn();
+
+    const report = await driver.executeIntent({
+      agent_id: "resident-1",
+      intent_type: "gather",
+      target: "wood",
+      reason: "bootstrap",
+      priority: 1,
+      cancel_conditions: [],
+      success_conditions: [],
+      trigger: "idle_check"
+    });
+
+    requireSpy.mockRestore();
+    expect(bot.dig).not.toHaveBeenCalled();
+    expect(report.status).toBe("failed");
+    expect(report.needs_replan).toBe(true);
+    expect(report.notes[0]).toContain("Took to long to decide path to goal");
+  });
+
+  it("fails stalled move intents after the execution deadline instead of hanging forever", async () => {
+    vi.useFakeTimers();
+    const { driver, bot, requireSpy } = await connectFightHarness((hostile) => hostile);
+
+    bot.pathfinder.goto.mockImplementation(() => new Promise(() => {}));
+
+    const reportPromise = driver.executeIntent({
+      agent_id: "resident-1",
+      intent_type: "move",
+      target: { x: 8, y: 64, z: 0 },
+      reason: "reposition",
+      priority: 1,
+      cancel_conditions: [],
+      success_conditions: [],
+      trigger: "task_failure"
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    const report = await reportPromise;
+
+    requireSpy.mockRestore();
+    expect(bot.pathfinder.stop).toHaveBeenCalledOnce();
+    expect(report.status).toBe("failed");
+    expect(report.needs_replan).toBe(true);
+    expect(report.notes[0]).toContain("move timed out while waiting on navigation");
+  });
+
+  it("fails stalled gather intents after the execution deadline instead of hanging forever", async () => {
+    vi.useFakeTimers();
+    const { driver, bot, requireSpy } = await connectFightHarness((hostile) => hostile);
+
+    bot.findBlock = vi.fn(() => ({
+      name: "oak_log",
+      position: { x: 4, y: 64, z: 0 }
+    }));
+    bot.pathfinder.goto.mockImplementation(() => new Promise(() => {}));
+
+    const reportPromise = driver.executeIntent({
+      agent_id: "resident-1",
+      intent_type: "gather",
+      target: "wood",
+      reason: "bootstrap",
+      priority: 1,
+      cancel_conditions: [],
+      success_conditions: [],
+      trigger: "spawn"
+    });
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    const report = await reportPromise;
+
+    requireSpy.mockRestore();
+    expect(bot.pathfinder.stop).toHaveBeenCalledOnce();
+    expect(report.status).toBe("failed");
+    expect(report.needs_replan).toBe(true);
+    expect(report.notes[0]).toContain("gather timed out while waiting on navigation");
+  });
 });
 
 async function connectFightHarness(mapHostile: (hostile: ReturnType<typeof createHostile>) => unknown) {
@@ -190,16 +288,6 @@ async function connectFightHarness(mapHostile: (hostile: ReturnType<typeof creat
         }
       };
     }
-    if (id === "mineflayer-collectblock") {
-      return {
-        plugin: collectBlockPlugin
-      };
-    }
-    if (id === "prismarine-viewer") {
-      return {
-        mineflayer: mineflayerViewer
-      };
-    }
     return originalRequire.call(this, id);
   });
 
@@ -210,12 +298,15 @@ async function connectFightHarness(mapHostile: (hostile: ReturnType<typeof creat
   bot.equip = vi.fn().mockResolvedValue(undefined);
   bot.attack = vi.fn().mockResolvedValue(undefined);
   bot.pathfinder = {
-    goto: vi.fn().mockResolvedValue(undefined)
+    goto: vi.fn().mockResolvedValue(undefined),
+    stop: vi.fn()
   };
+  bot.dig = vi.fn().mockResolvedValue(undefined);
   bot.inventory = {
     items: vi.fn(() => [{ name: "stone_sword" }]),
     slots: Array(9).fill(null)
   };
+  bot.findBlock = vi.fn(() => null);
   bot.entity = {
     id: "resident",
     position: {

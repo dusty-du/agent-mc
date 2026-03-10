@@ -24,6 +24,7 @@ import {
 } from "@resident/shared";
 import { DEFAULT_VALUE_PROFILE } from "@resident/shared";
 import { LiveMineflayerDriver, LiveMineflayerDriverConfig } from "./live-mineflayer-driver";
+import { ResidentPresentationController } from "./presentation-state";
 import { IntentExecutionContext, ResidentBotRuntime } from "./resident-bot";
 
 export interface ResidentAgentRunnerConfig extends LiveMineflayerDriverConfig {
@@ -35,6 +36,7 @@ export interface ResidentAgentRunnerConfig extends LiveMineflayerDriverConfig {
 }
 
 export class ResidentAgentRunner {
+  private readonly presentation = new ResidentPresentationController();
   private readonly driver: LiveMineflayerDriver;
   private readonly runtime: ResidentBotRuntime;
   private readonly memory: MemoryManager;
@@ -49,7 +51,10 @@ export class ResidentAgentRunner {
   private daily = new DailyAccumulator();
 
   constructor(private readonly config: ResidentAgentRunnerConfig) {
-    this.driver = new LiveMineflayerDriver(config);
+    this.driver = new LiveMineflayerDriver({
+      ...config,
+      presentation: this.presentation
+    });
     this.runtime = new ResidentBotRuntime(this.driver);
     this.intervalMs = config.intervalMs ?? Number(process.env.RESIDENT_LOOP_MS ?? 4000);
     this.serveBrain = config.serveBrain ?? true;
@@ -67,7 +72,9 @@ export class ResidentAgentRunner {
   async run(): Promise<void> {
     await this.driver.connect();
     if (this.serveBrain) {
-      this.brainServer = createResidentBrainServer(this.memory, this.sleepCore, this.brainPort);
+      this.brainServer = createResidentBrainServer(this.memory, this.sleepCore, this.brainPort, {
+        presentation: this.presentation
+      });
     }
 
     let latestOvernight = await this.sleepCore.latestOvernight();
@@ -97,6 +104,15 @@ export class ResidentAgentRunner {
         position: previousPerception.position
       });
       const decision = await this.executive.decide(previousPerception, currentMemory, values, latestOvernight, trigger);
+      if (decision.intent.dialogue?.trim()) {
+        this.presentation.publishThought({
+          residentId: decision.intent.agent_id,
+          residentName: decision.intent.agent_id,
+          text: decision.intent.dialogue
+        });
+      } else {
+        this.presentation.clear();
+      }
       const latestMemory = await this.memory.current();
       await this.memory.replace(mergeMemoryState(decision.memory, latestMemory));
       for (const observation of decision.observations) {

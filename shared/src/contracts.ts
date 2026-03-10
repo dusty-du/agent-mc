@@ -296,6 +296,22 @@ export interface AgentIntent {
   trigger?: ReplanTrigger;
 }
 
+export interface ResidentThoughtPresentation {
+  residentId: string;
+  residentName: string;
+  text: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface ResidentPresentationState {
+  thought: ResidentThoughtPresentation | null;
+}
+
+export interface ResidentPresentationSource {
+  getPresentationState(now?: number): ResidentPresentationState;
+}
+
 export interface SleepEpisode {
   agent_id: string;
   day_number: number;

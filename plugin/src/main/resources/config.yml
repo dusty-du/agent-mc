@@ -7,4 +7,6 @@ brain:
   player-chat-radius: 48
 resident:
   username: "your-resident-name"
+  thought-bubble-poll-ticks: 10
+  thought-bubble-offset-y: 2.6
 protected-areas: {}

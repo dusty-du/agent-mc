@@ -7,7 +7,7 @@
     "outDir": "dist",
     "paths": {
       "@resident/shared": [
-        "../shared/src"
+        "../shared/src/index.ts"
       ]
     }
   },

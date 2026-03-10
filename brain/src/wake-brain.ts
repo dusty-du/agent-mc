@@ -173,6 +173,7 @@ export class WakeBrain {
       const risk = this.combatRisk(frame);
       const retreatTarget = frame.safe_route_state.nearestShelter ?? frame.home_state.anchor;
       const hostileDistance = nearestHostileDistance(frame);
+      const distantHostile = hostileDistance !== undefined && hostileDistance > COMBAT_ENGAGE_DISTANCE;
       if (risk > 0.55) {
         observations.push(
           observationFrom(frame, "danger", "Danger is close; safety matters more than pride right now.", ["combat", "retreat", "survival"])
@@ -196,7 +197,7 @@ export class WakeBrain {
         };
       }
 
-      if (hostileDistance !== undefined && hostileDistance > COMBAT_ENGAGE_DISTANCE) {
+      if (distantHostile) {
         observations.push(
           observationFrom(
             frame,
@@ -225,16 +226,21 @@ export class WakeBrain {
             wakeOrientation
           };
         }
+      }
 
+      if (!distantHostile) {
+        observations.push(
+          observationFrom(frame, "combat", "The odds are tense but still manageable if I stay careful.", ["combat", "defense"], "perception")
+        );
         return {
           intent: {
             agent_id: frame.agent_id,
-            intent_type: "observe",
-            reason: "Watch distant danger instead of rushing into a fight that has not reached me yet.",
-            priority: 1,
-            cancel_conditions: ["hostiles close in", "safe route becomes clear"],
-            success_conditions: ["hostile movement understood", "new safe response chosen"],
-            dialogue: "I need to watch this carefully before I do anything rash.",
+            intent_type: "fight",
+            reason: "Fight only because the odds are acceptable and retreat is limited.",
+            priority: 2,
+            cancel_conditions: ["health drops below retreat threshold", "additional hostiles join"],
+            success_conditions: ["immediate hostile threat removed"],
+            dialogue: "I can handle this if I stay careful.",
             trigger
           },
           memory: nextMemory,
@@ -243,26 +249,6 @@ export class WakeBrain {
           wakeOrientation
         };
       }
-
-      observations.push(
-        observationFrom(frame, "combat", "The odds are tense but still manageable if I stay careful.", ["combat", "defense"], "perception")
-      );
-      return {
-        intent: {
-          agent_id: frame.agent_id,
-          intent_type: "fight",
-          reason: "Fight only because the odds are acceptable and retreat is limited.",
-          priority: 2,
-          cancel_conditions: ["health drops below retreat threshold", "additional hostiles join"],
-          success_conditions: ["immediate hostile threat removed"],
-          dialogue: "I can handle this if I stay careful.",
-          trigger
-        },
-        memory: nextMemory,
-        observations,
-        replanLevel,
-        wakeOrientation
-      };
     }
 
     if (trigger === "damage" && frame.health < 16) {

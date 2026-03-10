@@ -10,6 +10,8 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.event.entity.EntityDamageEvent;
@@ -20,6 +22,7 @@ public final class BrainClient {
     private final ResidentPlugin plugin;
     private final HttpClient httpClient;
     private final URI endpoint;
+    private final URI presentationEndpoint;
     private final Duration requestTimeout;
     private final String authToken;
     private final String serverName;
@@ -29,6 +32,7 @@ public final class BrainClient {
 
         String endpointValue = plugin.getConfig().getString("brain.endpoint", "https://brain.example.invalid/brain/events");
         this.endpoint = URI.create(endpointValue);
+        this.presentationEndpoint = endpoint.resolve("/resident/presentation");
 
         long connectTimeoutMs = Math.max(100L, plugin.getConfig().getLong("brain.connect-timeout-ms", 2_000L));
         long requestTimeoutMs = Math.max(100L, plugin.getConfig().getLong("brain.request-timeout-ms", 5_000L));
@@ -43,6 +47,34 @@ public final class BrainClient {
 
     public String endpoint() {
         return endpoint.toString();
+    }
+
+    public CompletableFuture<ResidentPresentationSnapshot> fetchResidentPresentation() {
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(presentationEndpoint)
+            .timeout(requestTimeout)
+            .header("Accept", "application/json")
+            .GET();
+
+        if (!authToken.isBlank()) {
+            requestBuilder.header("Authorization", "Bearer " + authToken);
+        }
+
+        return httpClient.sendAsync(requestBuilder.build(), HttpResponse.BodyHandlers.ofString())
+            .thenApply(response -> {
+                int statusCode = response.statusCode();
+                if (statusCode >= 200 && statusCode < 300) {
+                    return parseResidentPresentation(response.body());
+                }
+
+                plugin.getLogger().warning(
+                    "Brain endpoint returned HTTP " + statusCode + " for resident presentation."
+                );
+                return new ResidentPresentationSnapshot(null);
+            })
+            .exceptionally(error -> {
+                plugin.getLogger().warning("Failed to GET resident presentation: " + error.getMessage());
+                return new ResidentPresentationSnapshot(null);
+            });
     }
 
     public CompletableFuture<Boolean> postResidentStatus(Player player, String status, String origin) {
@@ -184,5 +216,95 @@ public final class BrainClient {
 
     private static double round(double value) {
         return Math.round(value * 100.0D) / 100.0D;
+    }
+
+    private static ResidentPresentationSnapshot parseResidentPresentation(String json) {
+        if (json == null || json.isBlank()) {
+            return new ResidentPresentationSnapshot(null);
+        }
+
+        int thoughtIndex = json.indexOf("\"thought\"");
+        if (thoughtIndex < 0) {
+            return new ResidentPresentationSnapshot(null);
+        }
+
+        int colonIndex = json.indexOf(':', thoughtIndex);
+        if (colonIndex < 0) {
+            return new ResidentPresentationSnapshot(null);
+        }
+
+        String thoughtJson = json.substring(colonIndex + 1).trim();
+        if (thoughtJson.startsWith("null")) {
+            return new ResidentPresentationSnapshot(null);
+        }
+
+        return new ResidentPresentationSnapshot(
+            new ResidentPresentationThought(
+                extractJsonString(thoughtJson, "residentId"),
+                extractJsonString(thoughtJson, "residentName"),
+                extractJsonString(thoughtJson, "text"),
+                extractJsonString(thoughtJson, "createdAt"),
+                extractJsonString(thoughtJson, "expiresAt")
+            )
+        );
+    }
+
+    private static String extractJsonString(String json, String field) {
+        Pattern pattern = Pattern.compile("\"" + Pattern.quote(field) + "\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
+        Matcher matcher = pattern.matcher(json);
+        if (!matcher.find()) {
+            return "";
+        }
+
+        return unescapeJson(matcher.group(1));
+    }
+
+    private static String unescapeJson(String value) {
+        StringBuilder builder = new StringBuilder(value.length());
+
+        for (int index = 0; index < value.length(); index++) {
+            char current = value.charAt(index);
+            if (current != '\\' || index + 1 >= value.length()) {
+                builder.append(current);
+                continue;
+            }
+
+            char escaped = value.charAt(++index);
+            switch (escaped) {
+                case '"' -> builder.append('"');
+                case '\\' -> builder.append('\\');
+                case '/' -> builder.append('/');
+                case 'b' -> builder.append('\b');
+                case 'f' -> builder.append('\f');
+                case 'n' -> builder.append('\n');
+                case 'r' -> builder.append('\r');
+                case 't' -> builder.append('\t');
+                case 'u' -> {
+                    if (index + 4 >= value.length()) {
+                        builder.append("\\u");
+                        break;
+                    }
+
+                    String hex = value.substring(index + 1, index + 5);
+                    builder.append((char) Integer.parseInt(hex, 16));
+                    index += 4;
+                }
+                default -> builder.append(escaped);
+            }
+        }
+
+        return builder.toString();
+    }
+
+    public record ResidentPresentationThought(
+        String residentId,
+        String residentName,
+        String text,
+        String createdAt,
+        String expiresAt
+    ) {
+    }
+
+    public record ResidentPresentationSnapshot(ResidentPresentationThought thought) {
     }
 }

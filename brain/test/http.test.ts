@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_LIVESTOCK_STATE, DailyOutcome, PerceptionFrame } from "@resident/shared";
+import { DEFAULT_LIVESTOCK_STATE, DailyOutcome, PerceptionFrame, ResidentPresentationSource } from "@resident/shared";
 import { FileBackedMemoryStore } from "../src/memory/file-store";
 import { MemoryManager } from "../src/memory/memory-manager";
 import { createResidentBrainServer } from "../src/server/http";
@@ -156,10 +156,12 @@ describe("createResidentBrainServer", () => {
 
   it("queues sleep work in awake memory when model-backed consolidation fails", async () => {
     const { port, memory } = await createHarness(cleanups, {
-      modelName: "sleep-test",
-      synthesize: vi.fn(async () => {
-        throw new Error("model offline");
-      })
+      consolidator: {
+        modelName: "sleep-test",
+        synthesize: vi.fn(async () => {
+          throw new Error("model offline");
+        })
+      }
     });
 
     const observationResponse = await fetch(`http://127.0.0.1:${port}/memory/observations`, {
@@ -195,15 +197,49 @@ describe("createResidentBrainServer", () => {
     expect(pending[0]?.last_error).toContain("Sleep consolidation failed.");
     expect(pending[0]?.last_error).toContain("sleep-test");
   });
+
+  it("exposes the current resident presentation state", async () => {
+    const presentation: ResidentPresentationSource = {
+      getPresentationState() {
+        return {
+          thought: {
+            residentId: "resident-1",
+            residentName: "resident-1",
+            text: "I should check the fields before dusk.",
+            createdAt: "2026-03-09T12:00:00.000Z",
+            expiresAt: "2026-03-09T12:00:06.000Z"
+          }
+        };
+      }
+    };
+    const { port } = await createHarness(cleanups, { presentation });
+
+    const response = await fetch(`http://127.0.0.1:${port}/resident/presentation`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      thought: {
+        residentId: "resident-1",
+        residentName: "resident-1",
+        text: "I should check the fields before dusk.",
+        createdAt: "2026-03-09T12:00:00.000Z",
+        expiresAt: "2026-03-09T12:00:06.000Z"
+      }
+    });
+  });
 });
 
-async function createHarness(cleanups: Array<() => Promise<void>>, consolidator: SleepConsolidator = createHarnessConsolidator()) {
+async function createHarness(
+  cleanups: Array<() => Promise<void>>,
+  options: { consolidator?: SleepConsolidator; presentation?: ResidentPresentationSource } = {}
+) {
   const dir = await mkdtemp(join(tmpdir(), "resident-brain-http-"));
   const sleepStore = new FileBackedSleepStore(join(dir, "sleep.json"));
   const memory = new MemoryManager(new FileBackedMemoryStore(join(dir, "memory.json")), sleepStore);
   await memory.syncPerception(basePerception);
-  const sleepCore = new SleepCore(sleepStore, consolidator);
-  const server = createResidentBrainServer(memory, sleepCore, 0);
+  const sleepCore = new SleepCore(sleepStore, options.consolidator ?? createHarnessConsolidator());
+  const server = createResidentBrainServer(memory, sleepCore, 0, {
+    presentation: options.presentation
+  });
   const port = (server.address() as AddressInfo).port;
 
   cleanups.push(async () => {

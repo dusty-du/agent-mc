@@ -3,6 +3,7 @@ import type { ResidentAgentRunnerConfig } from "./agent-runner";
 export * from "./resident-bot";
 export * from "./live-mineflayer-driver";
 export * from "./agent-runner";
+export * from "./presentation-state";
 
 export const DEFAULT_MINECRAFT_VIEWER_PORT = 3000;
 

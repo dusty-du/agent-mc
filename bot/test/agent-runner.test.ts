@@ -323,6 +323,76 @@ describe("ResidentAgentRunner", () => {
     );
     expect(executiveDecide.mock.calls[1]?.[4]).toBe("task_failure");
   });
+
+  it("publishes the current intent dialogue through the presentation source shared with the brain server", async () => {
+    const { ResidentAgentRunner } = await import("../src/agent-runner");
+    const baseMemory = createMemory();
+    const perception = createPerception();
+    let runner: InstanceType<typeof ResidentAgentRunner> | undefined;
+
+    driverConnect.mockResolvedValue(undefined);
+    sleepLatestOvernight.mockResolvedValue(undefined);
+    sleepCurrentValues.mockResolvedValue(DEFAULT_VALUE_PROFILE);
+    memorySyncPerception.mockResolvedValue(baseMemory);
+    memoryPendingSleepWork.mockResolvedValue([]);
+    memoryCurrent.mockResolvedValue(baseMemory);
+    memoryReplace.mockResolvedValue(baseMemory);
+    memoryRemember.mockResolvedValue(baseMemory);
+    memoryRememberReport.mockResolvedValue(baseMemory);
+    memoryRememberActionSnapshot.mockResolvedValue(baseMemory);
+    executiveDecide.mockResolvedValue({
+      intent: {
+        agent_id: "resident-1",
+        intent_type: "observe",
+        reason: "pause and think",
+        priority: 3,
+        cancel_conditions: [],
+        success_conditions: [],
+        dialogue: "I should pause and read the shape of this place.",
+        trigger: "idle_check"
+      },
+      memory: baseMemory,
+      observations: [],
+      replanLevel: "soft"
+    });
+    runtimeTick
+      .mockResolvedValueOnce({ perception })
+      .mockImplementationOnce(async () => {
+        runner?.stop();
+        return {
+          perception,
+          report: {
+            intent_type: "observe",
+            status: "completed",
+            notes: [],
+            damage_taken: 0,
+            inventory_delta: {},
+            world_delta: [],
+            needs_replan: false
+          }
+        };
+      });
+
+    runner = new ResidentAgentRunner({
+      host: "127.0.0.1",
+      port: 25565,
+      username: "resident-1",
+      auth: "offline",
+      serveBrain: true,
+      intervalMs: 0
+    });
+
+    await runner.run();
+
+    const presentation = createServer.mock.calls[0]?.[3]?.presentation;
+    expect(presentation?.getPresentationState()).toEqual({
+      thought: expect.objectContaining({
+        residentId: "resident-1",
+        residentName: "resident-1",
+        text: "I should pause and read the shape of this place."
+      })
+    });
+  });
 });
 
 function createMemory(): MemoryState {

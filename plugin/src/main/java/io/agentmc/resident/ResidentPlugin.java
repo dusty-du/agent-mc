@@ -9,6 +9,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 public final class ResidentPlugin extends JavaPlugin {
     private BrainClient brainClient;
     private ProtectedAreaManager protectedAreaManager;
+    private ResidentThoughtBubbleService thoughtBubbleService;
 
     @Override
     public void onEnable() {
@@ -38,8 +39,17 @@ public final class ResidentPlugin extends JavaPlugin {
         );
 
         brainClient.postProtectedAreaSnapshot(protectedAreaManager.all(), "startup");
+        this.thoughtBubbleService = new ResidentThoughtBubbleService(this, brainClient);
+        this.thoughtBubbleService.start();
 
         getLogger().info("Resident plugin enabled; posting to " + brainClient.endpoint());
+    }
+
+    @Override
+    public void onDisable() {
+        if (thoughtBubbleService != null) {
+            thoughtBubbleService.stop();
+        }
     }
 
     public boolean isResidentPlayer(org.bukkit.entity.Player player) {
