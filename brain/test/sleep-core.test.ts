@@ -50,8 +50,8 @@ describe("SleepCore", () => {
 
       const fetchMock = vi.fn(async () => ({
         ok: true,
-        json: async () => ({
-          output_text: JSON.stringify({
+        json: async () =>
+          responseWithFunctionCall("submit_overnight_consolidation", {
             summary: "A softer night settled over the doorway.",
             insights: ["Keep the warm threshold ready for tomorrow."],
             risk_themes: ["Skeleton near the tree line."],
@@ -60,7 +60,6 @@ describe("SleepCore", () => {
             project_memories: ["Doorway Repair: Keep the entrance dry and bright."],
             creative_motifs: ["The doorway looked warm in the rain."]
           })
-        })
       }));
       vi.stubGlobal("fetch", fetchMock);
 
@@ -72,8 +71,16 @@ describe("SleepCore", () => {
       const record = await sleepCore.consolidate(sampleBundle(), sampleOutcome());
 
       const [, request] = fetchMock.mock.calls[0] ?? [];
+      const requestBody = JSON.parse(String((request as RequestInit).body));
       expect(fetchMock).toHaveBeenCalledOnce();
-      expect(JSON.parse(String((request as RequestInit).body)).model).toBe("gpt-sleep-test");
+      expect(requestBody.model).toBe("gpt-sleep-test");
+      expect(requestBody.tool_choice).toEqual({ type: "function", name: "submit_overnight_consolidation" });
+      expect(requestBody.tools).toEqual([
+        expect.objectContaining({
+          type: "function",
+          name: "submit_overnight_consolidation"
+        })
+      ]);
       expect(record.summary).toBe("A softer night settled over the doorway.");
       expect(record.overnight.emotional_themes).toEqual(["relieved"]);
       expect(record.overnight.project_memories).toEqual(["Doorway Repair: Keep the entrance dry and bright."]);
@@ -202,6 +209,220 @@ describe("SleepCore", () => {
           ]
         })
       );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses forced function calls for model-backed day reflection", async () => {
+    process.env.RESIDENT_REFLECTIVE_OPENAI_MODEL = "gpt-sleep-test";
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.RESIDENT_OPENAI_BASE_URL = "https://sleep.example/v1";
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () =>
+        responseWithFunctionCall("submit_day_reflection", {
+          summary: "The sunrise over home felt worth carrying forward.",
+          event_kind: "wonder",
+          salience: 0.74,
+          dominant_emotions: ["awed", "hopeful"],
+          appraisal: {
+            curiosity: 0.58,
+            comfort: 0.42,
+            wonder: 0.82
+          },
+          regulation: {
+            arousal: 0.34,
+            resolve: 0.3,
+            recovery: 0.48
+          },
+          observation: {
+            category: "beauty",
+            summary: "The sunrise over home steadied something in him.",
+            tags: ["wonder", "sunrise", "home"],
+            importance: 0.74
+          }
+        })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const consolidator = createOpenAIReflectiveConsolidatorFromEnv();
+    const reflection = await consolidator.reflectDay({
+      trigger: "wonder",
+      previousPerception: samplePerception(900),
+      currentPerception: samplePerception(1200),
+      memory: sampleMemory(),
+      recentObservations: sampleBundle().observations,
+      recentActionSnapshot: sampleBundle().recent_action_snapshots[0],
+      latestDayReflections: []
+    });
+
+    const [, request] = fetchMock.mock.calls[0] ?? [];
+    const requestBody = JSON.parse(String((request as RequestInit).body));
+    expect(requestBody.tool_choice).toEqual({ type: "function", name: "submit_day_reflection" });
+    expect(requestBody.tools).toEqual([
+      expect.objectContaining({
+        type: "function",
+        name: "submit_day_reflection"
+      })
+    ]);
+    expect(reflection.event_kind).toBe("wonder");
+    expect(reflection.summary).toContain("sunrise");
+  });
+
+  it("fails loudly when the reflective model returns no function call", async () => {
+    process.env.RESIDENT_REFLECTIVE_OPENAI_MODEL = "gpt-sleep-test";
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.RESIDENT_OPENAI_BASE_URL = "https://sleep.example/v1";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          output: [
+            {
+              type: "message",
+              content: [{ type: "output_text", text: "Here is a prose answer instead." }]
+            }
+          ]
+        })
+      }))
+    );
+
+    const consolidator = createOpenAIReflectiveConsolidatorFromEnv();
+    await expect(
+      consolidator.reflectDay({
+        trigger: "wonder",
+        previousPerception: samplePerception(900),
+        currentPerception: samplePerception(1200),
+        memory: sampleMemory(),
+        recentObservations: sampleBundle().observations,
+        recentActionSnapshot: sampleBundle().recent_action_snapshots[0],
+        latestDayReflections: []
+      })
+    ).rejects.toThrow('Reflective model returned no function call for "submit_day_reflection"');
+  });
+
+  it("fails loudly when the reflective model returns the wrong function name", async () => {
+    process.env.RESIDENT_REFLECTIVE_OPENAI_MODEL = "gpt-sleep-test";
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.RESIDENT_OPENAI_BASE_URL = "https://sleep.example/v1";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () =>
+          responseWithFunctionCall("submit_wrong_shape", {
+            summary: "Unexpected tool."
+          })
+      }))
+    );
+
+    const consolidator = createOpenAIReflectiveConsolidatorFromEnv();
+    await expect(
+      consolidator.synthesize({
+        bundle: sampleBundle(),
+        outcome: sampleOutcome(),
+        recentCultureSignals: [],
+        recentConsolidations: [],
+        recentDayReflections: []
+      })
+    ).rejects.toThrow('Reflective model returned function call "submit_wrong_shape" instead of "submit_overnight_consolidation"');
+  });
+
+  it("fails loudly when the reflective model returns invalid function arguments JSON", async () => {
+    process.env.RESIDENT_REFLECTIVE_OPENAI_MODEL = "gpt-sleep-test";
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.RESIDENT_OPENAI_BASE_URL = "https://sleep.example/v1";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({
+          output: [
+            {
+              type: "function_call",
+              name: "submit_day_reflection",
+              arguments: "{\"summary\":"
+            }
+          ]
+        })
+      }))
+    );
+
+    const consolidator = createOpenAIReflectiveConsolidatorFromEnv();
+    await expect(
+      consolidator.reflectDay({
+        trigger: "wonder",
+        previousPerception: samplePerception(900),
+        currentPerception: samplePerception(1200),
+        memory: sampleMemory(),
+        recentObservations: sampleBundle().observations,
+        recentActionSnapshot: sampleBundle().recent_action_snapshots[0],
+        latestDayReflections: []
+      })
+    ).rejects.toThrow('Reflective model returned invalid function arguments JSON for "submit_day_reflection"');
+  });
+
+  it("surfaces reflective HTTP failures directly", async () => {
+    process.env.RESIDENT_REFLECTIVE_OPENAI_MODEL = "gpt-sleep-test";
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.RESIDENT_OPENAI_BASE_URL = "https://sleep.example/v1";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: false,
+        status: 502
+      }))
+    );
+
+    const consolidator = createOpenAIReflectiveConsolidatorFromEnv();
+    await expect(
+      consolidator.synthesize({
+        bundle: sampleBundle(),
+        outcome: sampleOutcome(),
+        recentCultureSignals: [],
+        recentConsolidations: [],
+        recentDayReflections: []
+      })
+    ).rejects.toThrow("Reflective model request failed with status 502.");
+  });
+
+  it("uses day reflection wording for day validation failures", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "resident-day-reflection-invalid-"));
+    try {
+      const store = new FileBackedSleepStore(join(dir, "sleep.json"));
+      const sleepCore = new SleepCore(store, {
+        ...sampleConsolidator(),
+        reflectDay: vi.fn(async () => ({
+          summary: "",
+          event_kind: "wonder",
+          salience: 0.4,
+          dominant_emotions: ["curious"],
+          appraisal: {
+            wonder: 0.5
+          },
+          regulation: {
+            recovery: 0.36
+          }
+        }))
+      });
+
+      await expect(
+        sleepCore.reflectDayEvent({
+          trigger: "wonder",
+          previousPerception: samplePerception(900),
+          currentPerception: samplePerception(1200),
+          memory: sampleMemory(),
+          recentObservations: sampleBundle().observations,
+          recentActionSnapshot: sampleBundle().recent_action_snapshots[0]
+        })
+      ).rejects.toThrow('Day reflection field "summary" must be a non-empty string.');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -493,4 +714,20 @@ function restoreEnv(name: string, value: string | undefined): void {
     return;
   }
   process.env[name] = value;
+}
+
+function responseWithFunctionCall(name: string, argumentsPayload: Record<string, unknown>) {
+  return {
+    output: [
+      {
+        type: "message",
+        content: [{ type: "output_text", text: "\n" }]
+      },
+      {
+        type: "function_call",
+        name,
+        arguments: JSON.stringify(argumentsPayload)
+      }
+    ]
+  };
 }

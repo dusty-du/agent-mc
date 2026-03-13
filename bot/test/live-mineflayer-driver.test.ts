@@ -186,7 +186,12 @@ describe("LiveMineflayerDriver", () => {
 
     requireSpy.mockRestore();
     expect(report.status).toBe("completed");
-    expect(report.notes[0]).toBe("I pause and take in the quiet of the world around me.");
+    expect(report.notes[0]).not.toContain("resident-1");
+    expect([
+      "I pause and let the area settle into focus around me.",
+      "I hold still long enough to read the shape of the world around me.",
+      "I pause and listen to what this place is telling me."
+    ]).toContain(report.notes[0]);
   });
 
   it("returns a failed gather report when pathfinding times out instead of hanging the driver", async () => {

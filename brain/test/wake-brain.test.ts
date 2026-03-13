@@ -6,6 +6,7 @@ import {
   MemoryState,
   PerceptionFrame
 } from "@resident/shared";
+import { composeEmotionDialogue } from "../src/emotion-core";
 import { createMemoryState } from "../src/memory/memory-state";
 import { WakeBrain } from "../src/wake-brain";
 
@@ -149,6 +150,13 @@ describe("WakeBrain combat decisions", () => {
       {
         ...basePerception,
         inventory: {},
+        home_state: {
+          ...basePerception.home_state,
+          anchor: undefined,
+          shelterScore: 0.3,
+          bedAvailable: false,
+          workshopReady: false
+        },
         terrain_affordances: [
           {
             type: "tree",
@@ -216,6 +224,66 @@ describe("WakeBrain combat decisions", () => {
 
     expect(decision.intent.intent_type).toBe("move");
     expect(decision.intent.target).toEqual({ x: 10, y: 64, z: 0 });
+  });
+
+  it("does not keep regathering wood once wood bootstrap is already secured", () => {
+    const decision = new WakeBrain().decide(
+      {
+        ...basePerception,
+        inventory: {
+          oak_log: 12
+        },
+        terrain_affordances: [
+          {
+            type: "tree",
+            location: { x: 6, y: 64, z: 2 },
+            note: "Wood and shade are nearby."
+          },
+          {
+            type: "water",
+            location: { x: 10, y: 64, z: 0 },
+            note: "Water nearby for farming or quiet reflection."
+          }
+        ],
+        home_state: {
+          ...basePerception.home_state,
+          anchor: undefined,
+          shelterScore: 0.3,
+          bedAvailable: false,
+          workshopReady: false
+        },
+        pantry_state: {
+          ...basePerception.pantry_state,
+          carriedCalories: 0,
+          pantryCalories: 0,
+          cookedMeals: 0,
+          emergencyReserveDays: 0
+        },
+        farm_state: {
+          ...basePerception.farm_state,
+          farmlandReady: false,
+          hydratedTiles: 0,
+          harvestableTiles: 0,
+          seedStock: {}
+        }
+      },
+      createMemoryWith({
+        bootstrap_progress: {
+          woodSecured: true,
+          toolsReady: false,
+          shelterSecured: false,
+          lightSecured: false,
+          foodSecured: false,
+          bedSecured: false
+        }
+      }),
+      DEFAULT_VALUE_PROFILE,
+      undefined,
+      "task_failure"
+    );
+
+    expect(decision.intent.intent_type).not.toBe("gather");
+    expect(decision.intent.dialogue?.toLowerCase()).not.toContain("i need wood before this place can start feeling livable");
   });
 
   it("bootstraps materials instead of falling straight into a no-material build loop", () => {
@@ -641,6 +709,381 @@ describe("WakeBrain combat decisions", () => {
 
     expect(decision.intent.intent_type).toBe("observe");
     expect(decision.intent.dialogue).toContain("worth");
+  });
+
+  it("varies neutral observe dialogue by personality and surroundings instead of repeating one canned line", () => {
+    const scenicFrame: PerceptionFrame = {
+      ...basePerception,
+      notable_places: ["river bend"],
+      terrain_affordances: [
+        {
+          type: "view",
+          location: { x: 6, y: 66, z: 1 },
+          note: "A high overlook."
+        }
+      ]
+    };
+    const fallback = "I want one clear read of the moment before I commit.";
+    const caretakerDialogue = composeEmotionDialogue(
+      createMemoryWith({
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          seed: "caretaker-seed",
+          traits: {
+            openness: 0.36,
+            conscientiousness: 0.58,
+            extraversion: 0.28,
+            agreeableness: 0.82,
+            threat_sensitivity: 0.71
+          },
+          motifs: {
+            primary: "caretaker",
+            secondary: "sentinel"
+          },
+          style_tags: ["caretaker", "sentinel", "gentle", "cautious"]
+        }
+      }),
+      scenicFrame,
+      fallback,
+      "observe"
+    );
+    const wandererDialogue = composeEmotionDialogue(
+      createMemoryWith({
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          seed: "wanderer-seed",
+          traits: {
+            openness: 0.8,
+            conscientiousness: 0.44,
+            extraversion: 0.42,
+            agreeableness: 0.46,
+            threat_sensitivity: 0.26
+          },
+          motifs: {
+            primary: "wanderer",
+            secondary: "tinkerer"
+          },
+          style_tags: ["wanderer", "tinkerer", "curious"]
+        }
+      }),
+      scenicFrame,
+      fallback,
+      "observe"
+    );
+
+    expect(caretakerDialogue).not.toBe(fallback);
+    expect(wandererDialogue).not.toBe(fallback);
+    expect(caretakerDialogue).not.toBe(wandererDialogue);
+    expect(caretakerDialogue.toLowerCase()).toMatch(/river bend|land opening out ahead/);
+    expect(wandererDialogue.toLowerCase()).toMatch(/river bend|land opening out ahead/);
+  });
+
+  it("varies neutral gather dialogue by personality instead of repeating one wood sentence", () => {
+    const woodedFrame: PerceptionFrame = {
+      ...basePerception,
+      terrain_affordances: [
+        {
+          type: "tree",
+          location: { x: 5, y: 64, z: 2 },
+          note: "Wood and shade are nearby."
+        }
+      ]
+    };
+    const fallback = "I need wood before this place can start feeling livable.";
+    const sentinelDialogue = composeEmotionDialogue(
+      createMemoryWith({
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          seed: "sentinel-gather-seed",
+          traits: {
+            openness: 0.34,
+            conscientiousness: 0.63,
+            extraversion: 0.24,
+            agreeableness: 0.44,
+            threat_sensitivity: 0.81
+          },
+          motifs: {
+            primary: "sentinel",
+            secondary: "homesteader"
+          },
+          style_tags: ["sentinel", "homesteader", "cautious"]
+        }
+      }),
+      woodedFrame,
+      fallback,
+      "gather"
+    );
+    const hostDialogue = composeEmotionDialogue(
+      createMemoryWith({
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          seed: "host-gather-seed",
+          traits: {
+            openness: 0.52,
+            conscientiousness: 0.48,
+            extraversion: 0.78,
+            agreeableness: 0.75,
+            threat_sensitivity: 0.29
+          },
+          motifs: {
+            primary: "host",
+            secondary: "caretaker"
+          },
+          style_tags: ["host", "caretaker", "warm", "gentle"]
+        }
+      }),
+      woodedFrame,
+      fallback,
+      "gather"
+    );
+
+    expect(sentinelDialogue).not.toBe(fallback);
+    expect(hostDialogue).not.toBe(fallback);
+    expect(sentinelDialogue).not.toBe(hostDialogue);
+    expect(sentinelDialogue.toLowerCase()).toMatch(/wood|tree line|shelter/);
+    expect(hostDialogue.toLowerCase()).toMatch(/wood|tree line|shelter/);
+  });
+
+  it("varies neutral build dialogue by personality instead of repeating one stock home line", () => {
+    const exposedFrame: PerceptionFrame = {
+      ...basePerception,
+      home_state: {
+        ...basePerception.home_state,
+        shelterScore: 0.26,
+        bedAvailable: false,
+        workshopReady: false
+      }
+    };
+    const fallback = "I want to make this place feel more like home.";
+    const sentinelDialogue = composeEmotionDialogue(
+      createMemoryWith({
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          seed: "sentinel-build-seed",
+          traits: {
+            openness: 0.31,
+            conscientiousness: 0.68,
+            extraversion: 0.22,
+            agreeableness: 0.4,
+            threat_sensitivity: 0.82
+          },
+          motifs: {
+            primary: "sentinel",
+            secondary: "homesteader"
+          },
+          style_tags: ["sentinel", "homesteader", "cautious"]
+        }
+      }),
+      exposedFrame,
+      fallback,
+      "build"
+    );
+    const hostDialogue = composeEmotionDialogue(
+      createMemoryWith({
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          seed: "host-build-seed",
+          traits: {
+            openness: 0.56,
+            conscientiousness: 0.52,
+            extraversion: 0.81,
+            agreeableness: 0.78,
+            threat_sensitivity: 0.24
+          },
+          motifs: {
+            primary: "host",
+            secondary: "caretaker"
+          },
+          style_tags: ["host", "caretaker", "warm", "gentle"]
+        }
+      }),
+      exposedFrame,
+      fallback,
+      "build"
+    );
+
+    expect(sentinelDialogue).not.toBe(fallback);
+    expect(hostDialogue).not.toBe(fallback);
+    expect(sentinelDialogue).not.toBe(hostDialogue);
+    expect(sentinelDialogue.toLowerCase()).toMatch(/shelter|cover|exposed|home/);
+    expect(hostDialogue.toLowerCase()).toMatch(/welcoming|warmer|home|shelter/);
+  });
+
+  it("rotates neutral build dialogue away from the last repeated thought", () => {
+    const frame: PerceptionFrame = {
+      ...basePerception,
+      home_state: {
+        ...basePerception.home_state,
+        shelterScore: 0.26,
+        bedAvailable: false,
+        workshopReady: false
+      }
+    };
+    const baseMemory = createMemoryWith({
+      personality_profile: {
+        ...createMemoryState().personality_profile,
+        seed: "repeat-build-seed",
+        motifs: {
+          primary: "homesteader",
+          secondary: "sentinel"
+        },
+        style_tags: ["homesteader", "sentinel", "steady"]
+      }
+    });
+    const firstLine = composeEmotionDialogue(baseMemory, frame, "I want to make this place feel more like home.", "build");
+    const repeatedMemory = createMemoryWith({
+      ...baseMemory,
+      recent_observations: [
+        {
+          timestamp: "2026-03-10T06:00:00.000Z",
+          category: "building",
+          summary: firstLine,
+          tags: ["thought", "dialogue", "build"],
+          importance: 0.24,
+          source: "dialogue"
+        }
+      ]
+    });
+
+    const rotatedLine = composeEmotionDialogue(repeatedMemory, frame, "I want to make this place feel more like home.", "build");
+
+    expect(rotatedLine).not.toBe(firstLine);
+    expect(rotatedLine.toLowerCase()).toMatch(/shelter|home|stay|shape/);
+  });
+
+  it("keeps move dialogue varied even when an active loss episode is steering the turn", () => {
+    const frame: PerceptionFrame = {
+      ...basePerception,
+      terrain_affordances: [
+        {
+          type: "tree",
+          location: { x: 8, y: 64, z: -2 },
+          note: "A tree line worth checking."
+        }
+      ],
+      home_state: {
+        ...basePerception.home_state,
+        shelterScore: 0.28,
+        bedAvailable: false,
+        workshopReady: false
+      }
+    };
+    const fallback = "I should head toward the tree line and see what it offers.";
+    const dialogue = composeEmotionDialogue(
+      createMemoryWith({
+        emotion_core: {
+          ...createMemoryState().emotion_core,
+          active_episode: {
+            id: "loss-1",
+            kind: "loss",
+            summary: "Navigation kept failing.",
+            started_at: "2026-03-10T06:00:00.000Z",
+            updated_at: "2026-03-10T06:01:00.000Z",
+            source_trigger: "task_failure",
+            dominant_emotions: ["steady"],
+            cause_tags: ["failure", "move"],
+            inventory_loss: [],
+            appraisal: {
+              threat: 0.22,
+              loss: 0.64,
+              pain: 0.08,
+              curiosity: 0.34,
+              connection: 0.28,
+              comfort: 0.22,
+              mastery: 0.3,
+              wonder: 0.16
+            },
+            regulation: {
+              arousal: 0.42,
+              shock: 0.18,
+              vigilance: 0.34,
+              resolve: 0.4,
+              recovery: 0.24
+            },
+            salience: 0.64,
+            intensity: 0.6,
+            revisit_policy: "open",
+            resolved: false
+          }
+        }
+      }),
+      frame,
+      fallback,
+      "move"
+    );
+
+    expect(dialogue).not.toBe(fallback);
+    expect(dialogue.toLowerCase()).toMatch(/needles|setback|failure|move/);
+    expect(dialogue.toLowerCase()).toMatch(/tree line|safer ground|open ground/);
+  });
+
+  it("turns internal place labels into natural observe speech", () => {
+    const dialogue = composeEmotionDialogue(
+      createMemoryWith({
+        personality_profile: {
+          ...createMemoryState().personality_profile,
+          seed: "caretaker-ground-seed",
+          motifs: {
+            primary: "caretaker",
+            secondary: "sentinel"
+          },
+          style_tags: ["caretaker", "sentinel", "gentle", "cautious"]
+        }
+      }),
+      {
+        ...basePerception,
+        notable_places: ["good building ground"],
+        terrain_affordances: []
+      },
+      "I want one clear read of the moment before I commit.",
+      "observe"
+    );
+
+    expect(dialogue.toLowerCase()).not.toContain("good building ground");
+    expect(dialogue.toLowerCase()).toContain("flat patch of ground");
+  });
+
+  it("breaks out of repeated stationary observe loops by scouting instead of observing again", () => {
+    const memory = createMemoryWith({
+      bootstrap_progress: {
+        woodSecured: true,
+        toolsReady: false,
+        shelterSecured: false,
+        lightSecured: false,
+        foodSecured: false,
+        bedSecured: false
+      },
+      recent_action_snapshots: Array.from({ length: 4 }, (_, index) => ({
+        timestamp: `2026-03-10T06:00:0${index}.000Z`,
+        intent_type: "observe" as const,
+        target_class: "observe",
+        status: "completed" as const,
+        position_delta: 0,
+        risk_context: "exposed" as const
+      }))
+    });
+
+    const decision = new WakeBrain().decide(
+      {
+        ...basePerception,
+        tick_time: 6000,
+        nearby_blocks: [],
+        terrain_affordances: [],
+        home_state: {
+          ...basePerception.home_state,
+          shelterScore: 0.3,
+          bedAvailable: false,
+          workshopReady: false
+        }
+      },
+      memory,
+      DEFAULT_VALUE_PROFILE,
+      undefined,
+      "task_completion"
+    );
+
+    expect(decision.intent.intent_type).not.toBe("observe");
+    expect(decision.intent.dialogue?.toLowerCase()).not.toContain("good building ground");
   });
 
   it("prioritizes crafting torches before dusk when light is unsecured", () => {

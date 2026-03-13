@@ -193,7 +193,6 @@ export function rememberObservation(memory: MemoryState, observation: MemoryObse
   const interactionNote =
     observation.category === "social" ||
     observation.category === "hospitality" ||
-    observation.source === "dialogue" ||
     observation.tags.includes("chat")
       ? observation.summary
       : undefined;

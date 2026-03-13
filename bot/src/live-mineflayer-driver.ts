@@ -1288,7 +1288,7 @@ function inferNotablePlaces(
       notes.add("wide view");
     }
     if (affordance.type === "flat") {
-      notes.add("good building ground");
+      notes.add("open ground");
     }
   }
   return [...notes].slice(0, 6);
@@ -1316,13 +1316,61 @@ function describeNearby(bot: Bot): string {
     (entity) => entity.id !== bot.entity.id && inferEntityType(entity.username ?? entity.name ?? "", entity.type) === "player"
   );
   const view = bot.findBlock({ matching: (block: { name: string }) => !block.name.includes("air"), maxDistance: 6 });
+  const key = [
+    bot.username ?? "resident",
+    player?.username ?? player?.name ?? "",
+    view?.name ?? "",
+    String(Math.round(bot.entity.position.x / 6)),
+    String(Math.round(bot.entity.position.y / 6)),
+    String(Math.round(bot.entity.position.z / 6)),
+    String((bot as { time?: { timeOfDay?: number } }).time?.timeOfDay ?? "")
+  ].join(":");
   if (player) {
-    return `I notice ${player.username ?? player.name ?? "someone"} nearby.`;
+    const name = player.username ?? player.name ?? "someone";
+    return pickStableNearbyVariant(
+      [
+        `I notice ${name} nearby.`,
+        `${name} is close enough to change the feel of this place.`,
+        `I catch sight of ${name} nearby and hold for a better read.`
+      ],
+      key
+    );
   }
   if (view) {
-    return `I pause to take in the ${view.name.replace(/_/g, " ")} nearby.`;
+    const blockName = view.name.replace(/_/g, " ");
+    return pickStableNearbyVariant(
+      [
+        `I pause to take in the ${blockName} nearby.`,
+        `The ${blockName} nearby gives me something concrete to read.`,
+        `I let the ${blockName} nearby settle into focus.`
+      ],
+      key
+    );
   }
-  return "I pause and take in the quiet of the world around me.";
+  return pickStableNearbyVariant(
+    [
+      "I pause and let the area settle into focus around me.",
+      "I hold still long enough to read the shape of the world around me.",
+      "I pause and listen to what this place is telling me."
+    ],
+    key
+  );
+}
+
+function pickStableNearbyVariant(options: readonly string[], key: string): string {
+  return options[stableNearbyIndex(key, options.length)] ?? options[0] ?? "";
+}
+
+function stableNearbyIndex(key: string, size: number): number {
+  if (size <= 1) {
+    return 0;
+  }
+  let hash = 2166136261;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % size;
 }
 
 function cropStage(block: BotBlockMaybe): "seedling" | "growing" | "ripe" | "unknown" {

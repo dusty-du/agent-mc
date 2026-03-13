@@ -167,6 +167,10 @@ export class ResidentAgentRunner {
       for (const observation of decision.observations) {
         await this.memory.remember(observation);
       }
+      const thoughtObservation = buildThoughtObservation(previousPerception, decision.intent);
+      if (thoughtObservation) {
+        await this.memory.remember(thoughtObservation);
+      }
       this.daily.recordObservations(decision.observations);
 
       if (decision.recallQuery) {
@@ -952,6 +956,60 @@ function buildActionSnapshot(
     position_delta: distance(previous.position, current.position),
     risk_context: classifyRiskContext(current)
   };
+}
+
+function buildThoughtObservation(
+  perception: PerceptionFrame,
+  intent: { intent_type: string; dialogue?: string }
+): MemoryObservation | undefined {
+  const summary = intent.dialogue?.trim();
+  if (!summary) {
+    return undefined;
+  }
+
+  return {
+    timestamp: new Date().toISOString(),
+    category: thoughtObservationCategory(intent.intent_type),
+    summary,
+    tags: ["thought", "dialogue", intent.intent_type],
+    importance: 0.24,
+    source: "dialogue",
+    location: perception.position
+  };
+}
+
+function thoughtObservationCategory(intentType: string): MemoryObservation["category"] {
+  switch (intentType) {
+    case "observe":
+    case "move":
+      return "discovery";
+    case "build":
+    case "rebuild":
+    case "repair":
+      return "building";
+    case "gather":
+    case "mine":
+    case "craft":
+    case "smelt":
+    case "store":
+      return "project";
+    case "farm":
+    case "tend_livestock":
+      return intentType === "farm" ? "food" : "livestock";
+    case "fight":
+    case "retreat":
+      return "danger";
+    case "recover":
+      return "recovery";
+    case "sleep":
+      return "sleep";
+    case "eat":
+      return "food";
+    case "socialize":
+      return "social";
+    default:
+      return "project";
+  }
 }
 
 function classifyActionTarget(

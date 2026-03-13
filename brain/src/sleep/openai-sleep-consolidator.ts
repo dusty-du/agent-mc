@@ -18,8 +18,167 @@ import {
 type OpenAIResponse = {
   output_text?: string;
   output?: Array<{
+    type?: string;
+    name?: string;
+    arguments?: string;
     content?: Array<{ type?: string; text?: string }>;
   }>;
+};
+
+type FunctionToolDefinition = {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+};
+
+const DAY_REFLECTION_FUNCTION_NAME = "submit_day_reflection";
+const OVERNIGHT_CONSOLIDATION_FUNCTION_NAME = "submit_overnight_consolidation";
+
+const DAY_REFLECTION_TOOL: FunctionToolDefinition = {
+  name: DAY_REFLECTION_FUNCTION_NAME,
+  description: "Return a structured daytime life reflection patch for one salient event.",
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      summary: { type: "string" },
+      event_kind: {
+        type: "string",
+        enum: ["death", "damage", "combat", "loss", "beauty", "social", "attachment", "nurture", "wonder", "play", "milestone", "achievement", "safety"]
+      },
+      salience: { type: "number", minimum: 0, maximum: 1 },
+      dominant_emotions: {
+        type: "array",
+        items: { type: "string" }
+      },
+      appraisal: numericPatchSchema([
+        "threat",
+        "loss",
+        "pain",
+        "curiosity",
+        "connection",
+        "comfort",
+        "mastery",
+        "wonder"
+      ]),
+      regulation: numericPatchSchema(["arousal", "shock", "vigilance", "resolve", "recovery"]),
+      action_biases: numericPatchSchema([
+        "avoid_risk",
+        "seek_shelter",
+        "seek_recovery",
+        "seek_company",
+        "seek_mastery",
+        "seek_wonder",
+        "cautious_revisit"
+      ]),
+      subject: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          kind: { type: "string", enum: ["player", "pet", "herd", "place", "moment"] },
+          label: { type: "string" }
+        },
+        required: ["kind", "label"]
+      },
+      place: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          kind: { type: "string", enum: ["death_site", "comfort_site", "awe_site", "nursery_site", "bond_site"] },
+          label: { type: "string" },
+          location: vec3Schema(),
+          world: { type: "string" },
+          salience: { type: "number", minimum: 0, maximum: 1 },
+          revisit_policy: { type: "string", enum: ["avoid", "cautious", "open"] }
+        },
+        required: ["kind", "label", "location"]
+      },
+      bond: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          kind: { type: "string", enum: ["player", "pet", "herd"] },
+          label: { type: "string" },
+          bond_kind: { type: "string", enum: ["familiar", "companion", "caretaking"] },
+          delta_familiarity: { type: "number", minimum: 0, maximum: 1 },
+          delta_attachment: { type: "number", minimum: 0, maximum: 1 },
+          home_affinity: { type: "number", minimum: 0, maximum: 1 }
+        },
+        required: ["kind", "label", "bond_kind", "delta_familiarity", "delta_attachment"]
+      },
+      interrupt: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          trigger: { type: "string", enum: ["death", "respawn", "social_contact", "bonding", "birth", "wonder"] },
+          reason: { type: "string" }
+        },
+        required: ["trigger", "reason"]
+      },
+      observation: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          category: {
+            type: "string",
+            enum: [
+              "discovery",
+              "food",
+              "crafting",
+              "building",
+              "rebuild",
+              "livestock",
+              "combat",
+              "social",
+              "beauty",
+              "sleep",
+              "danger",
+              "recovery",
+              "orientation",
+              "project",
+              "weather",
+              "hospitality"
+            ]
+          },
+          summary: { type: "string" },
+          tags: {
+            type: "array",
+            items: { type: "string" }
+          },
+          importance: { type: "number", minimum: 0, maximum: 1 }
+        },
+        required: ["category", "summary", "tags", "importance"]
+      }
+    },
+    required: ["summary", "event_kind", "salience", "dominant_emotions", "appraisal", "regulation"]
+  }
+};
+
+const OVERNIGHT_CONSOLIDATION_TOOL: FunctionToolDefinition = {
+  name: OVERNIGHT_CONSOLIDATION_FUNCTION_NAME,
+  description: "Return a structured overnight consolidation summary for the resident's next day.",
+  parameters: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      summary: { type: "string" },
+      insights: { type: "array", items: { type: "string" } },
+      risk_themes: { type: "array", items: { type: "string" } },
+      emotional_themes: { type: "array", items: { type: "string" } },
+      place_memories: { type: "array", items: { type: "string" } },
+      project_memories: { type: "array", items: { type: "string" } },
+      creative_motifs: { type: "array", items: { type: "string" } }
+    },
+    required: [
+      "summary",
+      "insights",
+      "risk_themes",
+      "emotional_themes",
+      "place_memories",
+      "project_memories",
+      "creative_motifs"
+    ]
+  }
 };
 
 export class OpenAIReflectiveConsolidator implements ReflectiveConsolidator {
@@ -30,45 +189,40 @@ export class OpenAIReflectiveConsolidator implements ReflectiveConsolidator {
   ) {}
 
   async synthesize(input: SleepConsolidationInput): Promise<SleepConsolidationResult> {
-    const payload = await this.requestStructuredJson(
+    return this.requestStructuredArguments<SleepConsolidationResult>(
       [
         "You are the reflective autobiographical core for an autonomous Minecraft resident.",
         "Perform overnight consolidation only.",
         "Use the daytime reflection records as same-day meaning traces, then compress them into stable next-day themes.",
         "Do not plan wake-time actions and do not invent new commitments.",
         "Preserve meaning, safety, hospitality, home, beauty, bonding, nurture, wonder, and recovery.",
-        "Return only strict JSON."
+        "Use the function schema exactly."
       ].join(" "),
-      buildOvernightPayload(input)
+      buildOvernightPayload(input),
+      OVERNIGHT_CONSOLIDATION_TOOL
     );
-
-    try {
-      return JSON.parse(payload) as SleepConsolidationResult;
-    } catch (error) {
-      throw new SleepConsolidationError("Sleep consolidation returned invalid JSON.", this.modelName, error);
-    }
   }
 
   async reflectDay(input: DayLifeReflectionInput): Promise<DayLifeReflectionResult> {
-    const payload = await this.requestStructuredJson(
+    return this.requestStructuredArguments<DayLifeReflectionResult>(
       [
         "You are the reflective life-core for an autonomous Minecraft resident during the awake loop.",
         "Appraise one salient event that already happened and return an emotional patch, not a plan.",
         "You may strengthen or contextualize emotions, bonds, and places, and you may suggest an interrupt when the moment deserves follow-up.",
+        "If you suggest an interrupt, the trigger must be exactly one of: death, respawn, social_contact, bonding, birth, wonder.",
         "Do not choose actions, do not create commitments, and do not rewrite full memory.",
-        "Return only strict JSON."
+        "Use the function schema exactly."
       ].join(" "),
-      buildDayReflectionPayload(input)
+      buildDayReflectionPayload(input),
+      DAY_REFLECTION_TOOL
     );
-
-    try {
-      return JSON.parse(payload) as DayLifeReflectionResult;
-    } catch (error) {
-      throw new SleepConsolidationError("Daytime life reflection returned invalid JSON.", this.modelName, error);
-    }
   }
 
-  private async requestStructuredJson(systemPrompt: string, payload: Record<string, unknown>): Promise<string> {
+  private async requestStructuredArguments<T>(
+    systemPrompt: string,
+    payload: Record<string, unknown>,
+    tool: FunctionToolDefinition
+  ): Promise<T> {
     const response = await fetch(`${this.baseUrl}/responses`, {
       method: "POST",
       headers: {
@@ -78,6 +232,18 @@ export class OpenAIReflectiveConsolidator implements ReflectiveConsolidator {
       body: JSON.stringify({
         model: this.modelName,
         max_output_tokens: 900,
+        tools: [
+          {
+            type: "function",
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters
+          }
+        ],
+        tool_choice: {
+          type: "function",
+          name: tool.name
+        },
         input: [
           {
             role: "system",
@@ -106,11 +272,32 @@ export class OpenAIReflectiveConsolidator implements ReflectiveConsolidator {
     }
 
     const body = (await response.json()) as OpenAIResponse;
-    const output = extractOutputText(body);
-    if (!output) {
-      throw new SleepConsolidationError("Reflective model returned no output text.", this.modelName);
+    const functionCall = extractFunctionCall(body, tool.name);
+    if (!functionCall.found) {
+      const diagnostic = diagnosticSuffix(body);
+      if (functionCall.kind === "wrong_name") {
+        throw new SleepConsolidationError(
+          `Reflective model returned function call "${functionCall.name}" instead of "${tool.name}".${diagnostic}`,
+          this.modelName,
+          body
+        );
+      }
+      throw new SleepConsolidationError(
+        `Reflective model returned no function call for "${tool.name}".${diagnostic}`,
+        this.modelName,
+        body
+      );
     }
-    return output;
+
+    try {
+      return JSON.parse(functionCall.arguments) as T;
+    } catch (error) {
+      throw new SleepConsolidationError(
+        `Reflective model returned invalid function arguments JSON for "${tool.name}".${diagnosticSuffix(body)}`,
+        this.modelName,
+        error
+      );
+    }
   }
 }
 
@@ -285,16 +472,75 @@ function buildDayReflectionPayload(input: DayLifeReflectionInput): {
   };
 }
 
-function extractOutputText(body: OpenAIResponse): string | undefined {
+function numericPatchSchema(keys: string[]): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: Object.fromEntries(keys.map((key) => [key, { type: "number", minimum: 0, maximum: 1 }]))
+  };
+}
+
+function vec3Schema(): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      x: { type: "number" },
+      y: { type: "number" },
+      z: { type: "number" }
+    },
+    required: ["x", "y", "z"]
+  };
+}
+
+function extractFunctionCall(
+  body: OpenAIResponse,
+  expectedName: string
+):
+  | { found: true; arguments: string }
+  | { found: false; kind: "missing" }
+  | { found: false; kind: "wrong_name"; name: string } {
+  let wrongName: string | undefined;
+  for (const item of body.output ?? []) {
+    if (item.type !== "function_call") {
+      continue;
+    }
+    if (item.name === expectedName && typeof item.arguments === "string") {
+      return { found: true, arguments: item.arguments };
+    }
+    if (item.name) {
+      wrongName = item.name;
+    }
+  }
+  if (wrongName) {
+    return { found: false, kind: "wrong_name", name: wrongName };
+  }
+  return { found: false, kind: "missing" };
+}
+
+function diagnosticSuffix(body: OpenAIResponse): string {
+  const text = collectOutputText(body);
+  if (!text) {
+    return "";
+  }
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return "";
+  }
+  return ` Output text: ${JSON.stringify(compact.slice(0, 160))}.`;
+}
+
+function collectOutputText(body: OpenAIResponse): string {
+  const chunks: string[] = [];
   if (body.output_text) {
-    return body.output_text;
+    chunks.push(body.output_text);
   }
   for (const item of body.output ?? []) {
     for (const content of item.content ?? []) {
       if (content.type === "output_text" && content.text) {
-        return content.text;
+        chunks.push(content.text);
       }
     }
   }
-  return undefined;
+  return chunks.join("\n");
 }

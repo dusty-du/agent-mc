@@ -217,13 +217,13 @@ function normalizeSleepConsolidationResult(
   model?: string
 ): SleepConsolidationResult {
   return {
-    summary: normalizeString(result.summary, "summary", model),
-    insights: normalizeStringArray(result.insights, 6, "insights", model),
-    risk_themes: normalizeStringArray(result.risk_themes, 4, "risk_themes", model),
-    emotional_themes: normalizeOptionalStringArray(result.emotional_themes, 5, "emotional_themes", model),
-    place_memories: normalizeStringArray(result.place_memories, 5, "place_memories", model),
-    project_memories: normalizeStringArray(result.project_memories, 4, "project_memories", model),
-    creative_motifs: normalizeStringArray(result.creative_motifs, 3, "creative_motifs", model)
+    summary: normalizeString(result.summary, "summary", "Sleep consolidation", model),
+    insights: normalizeStringArray(result.insights, 6, "insights", "Sleep consolidation", model),
+    risk_themes: normalizeStringArray(result.risk_themes, 4, "risk_themes", "Sleep consolidation", model),
+    emotional_themes: normalizeOptionalStringArray(result.emotional_themes, 5, "emotional_themes", "Sleep consolidation", model),
+    place_memories: normalizeStringArray(result.place_memories, 5, "place_memories", "Sleep consolidation", model),
+    project_memories: normalizeStringArray(result.project_memories, 4, "project_memories", "Sleep consolidation", model),
+    creative_motifs: normalizeStringArray(result.creative_motifs, 3, "creative_motifs", "Sleep consolidation", model)
   };
 }
 
@@ -231,7 +231,7 @@ function normalizeDayLifeReflectionResult(
   result: DayLifeReflectionResult,
   model?: string
 ): DayLifeReflectionResult {
-  const summary = normalizeString(result.summary, "summary", model);
+  const summary = normalizeString(result.summary, "summary", "Day reflection", model);
   const event_kind = normalizeEnum(
     result.event_kind,
     [
@@ -252,7 +252,7 @@ function normalizeDayLifeReflectionResult(
     "event_kind",
     model
   );
-  const dominant_emotions = normalizeOptionalStringArray(result.dominant_emotions, 4, "dominant_emotions", model);
+  const dominant_emotions = normalizeOptionalStringArray(result.dominant_emotions, 4, "dominant_emotions", "Day reflection", model);
   return {
     summary,
     event_kind,
@@ -276,7 +276,7 @@ function normalizeSubject(result: DayLifeReflectionResult["subject"], model?: st
   }
   return {
     kind: normalizeEnum(result.kind, ["player", "pet", "herd", "place", "moment"], "subject.kind", model),
-    label: normalizeString(result.label, "subject.label", model)
+    label: normalizeString(result.label, "subject.label", "Day reflection", model)
   };
 }
 
@@ -294,7 +294,7 @@ function normalizeTaggedPlace(
       "place.kind",
       model
     ) as EmotionTaggedPlaceKind,
-    label: normalizeString(place.label, "place.label", model),
+    label: normalizeString(place.label, "place.label", "Day reflection", model),
     location: normalizeVec3(place.location, "place.location", model),
     world: place.world?.trim() || undefined,
     salience: place.salience === undefined ? undefined : normalizeNumber(place.salience, "place.salience", model),
@@ -314,7 +314,7 @@ function normalizeBondDelta(
   }
   return {
     kind: normalizeEnum(bond.kind, ["player", "pet", "herd"], "bond.kind", model),
-    label: normalizeString(bond.label, "bond.label", model),
+    label: normalizeString(bond.label, "bond.label", "Day reflection", model),
     bond_kind: normalizeEnum(bond.bond_kind, ["familiar", "companion", "caretaking"], "bond.bond_kind", model),
     delta_familiarity: normalizeNumber(bond.delta_familiarity, "bond.delta_familiarity", model),
     delta_attachment: normalizeNumber(bond.delta_attachment, "bond.delta_attachment", model),
@@ -331,7 +331,7 @@ function normalizeInterrupt(
   }
   return {
     trigger: normalizeEnum(interrupt.trigger, ["death", "respawn", "social_contact", "bonding", "birth", "wonder"], "interrupt.trigger", model) as EmotionInterrupt["trigger"],
-    reason: normalizeString(interrupt.reason, "interrupt.reason", model)
+    reason: normalizeString(interrupt.reason, "interrupt.reason", "Day reflection", model)
   };
 }
 
@@ -349,8 +349,8 @@ function normalizeObservation(
       "observation.category",
       model
     ) as DayLifeReflectionObservation["category"],
-    summary: normalizeString(observation.summary, "observation.summary", model),
-    tags: normalizeStringArray(observation.tags, 8, "observation.tags", model),
+    summary: normalizeString(observation.summary, "observation.summary", "Day reflection", model),
+    tags: normalizeStringArray(observation.tags, 8, "observation.tags", "Day reflection", model),
     importance: normalizeNumber(observation.importance, "observation.importance", model)
   };
 }
@@ -390,25 +390,25 @@ function normalizeVec3(value: unknown, field: string, model?: string): { x: numb
   };
 }
 
-function normalizeString(value: unknown, field: string, model?: string): string {
+function normalizeString(value: unknown, field: string, context: string, model?: string): string {
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new SleepConsolidationError(`Sleep consolidation field "${field}" must be a non-empty string.`, model);
+    throw new SleepConsolidationError(`${context} field "${field}" must be a non-empty string.`, model);
   }
   return value.trim();
 }
 
-function normalizeStringArray(value: unknown, max: number, field: string, model?: string): string[] {
+function normalizeStringArray(value: unknown, max: number, field: string, context: string, model?: string): string[] {
   if (!Array.isArray(value)) {
-    throw new SleepConsolidationError(`Sleep consolidation field "${field}" must be an array.`, model);
+    throw new SleepConsolidationError(`${context} field "${field}" must be an array.`, model);
   }
-  return [...new Set(value.map((entry) => normalizeString(entry, field, model)).filter(Boolean))].slice(0, max);
+  return [...new Set(value.map((entry) => normalizeString(entry, field, context, model)).filter(Boolean))].slice(0, max);
 }
 
-function normalizeOptionalStringArray(value: unknown, max: number, field: string, model?: string): string[] {
+function normalizeOptionalStringArray(value: unknown, max: number, field: string, context: string, model?: string): string[] {
   if (value === undefined || value === null) {
     return [];
   }
-  return normalizeStringArray(value, max, field, model);
+  return normalizeStringArray(value, max, field, context, model);
 }
 
 function normalizeNumber(value: unknown, field: string, model?: string): number {

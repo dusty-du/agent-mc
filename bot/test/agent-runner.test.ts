@@ -697,6 +697,13 @@ describe("ResidentAgentRunner", () => {
         text: "I should pause and read the shape of this place."
       })
     });
+    expect(memoryRemember).toHaveBeenCalledWith(
+      expect.objectContaining({
+        summary: "I should pause and read the shape of this place.",
+        source: "dialogue",
+        tags: expect.arrayContaining(["thought", "dialogue", "observe"])
+      })
+    );
   });
 
   it("mirrors presentation updates to the standalone brain server when local brain serving is disabled", async () => {

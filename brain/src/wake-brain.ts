@@ -63,6 +63,12 @@ interface DailyCandidatePlan {
   recallQuery?: RecallQuery;
 }
 
+interface ScoutTarget {
+  location: Vec3;
+  label: string;
+  source: "affordance" | "block" | "frontier";
+}
+
 function isoNow(): string {
   return new Date().toISOString();
 }
@@ -875,8 +881,8 @@ export class WakeBrain {
         };
       }
 
-      const scoutTarget = pickScoutTarget(frame, ["tree", "water", "flat"]);
-      if (scoutTarget) {
+      const scoutTarget = pickScoutTarget(frame, memory, ["tree", "water", "flat"]);
+      if (scoutTarget && !(scoutTarget.source === "frontier" && isLowLightPhase(phase))) {
         return {
           kind: "bootstrap",
           family: `move:${Math.round(scoutTarget.location.x)}:${Math.round(scoutTarget.location.y)}:${Math.round(scoutTarget.location.z)}`,
@@ -941,8 +947,8 @@ export class WakeBrain {
     }
 
     if (!progress.foodSecured && phase !== "night") {
-      const scoutTarget = pickScoutTarget(frame, ["water", "flat", "tree"]);
-      if (scoutTarget) {
+      const scoutTarget = pickScoutTarget(frame, memory, ["water", "flat", "tree"]);
+      if (scoutTarget && !(scoutTarget.source === "frontier" && isLowLightPhase(phase))) {
         return {
           kind: "bootstrap",
           family: `move:${Math.round(scoutTarget.location.x)}:${Math.round(scoutTarget.location.y)}:${Math.round(scoutTarget.location.z)}`,
@@ -1115,11 +1121,15 @@ function pickSurvivalIntent(frame: PerceptionFrame, memory: MemoryState): Surviv
     return bootstrapIntent;
   }
 
+  if (!memory.bootstrap_progress.woodSecured || !memory.bootstrap_progress.shelterSecured || !memory.bootstrap_progress.foodSecured) {
+    return undefined;
+  }
+
   return {
     intentType: "observe",
     reason: "Pause briefly and reassess because no immediate food or movement opportunity is visible yet.",
     successConditions: ["a safer next step becomes clear"],
-    dialogue: "I need to look carefully before I commit myself.",
+    dialogue: composeEmotionDialogue(memory, frame, "I need to look carefully before I commit myself.", "observe"),
     observation: "The immediate area offers no obvious food path, so a careful pause is wiser than pretending otherwise.",
     observationTags: ["orientation", "survival", "observe"]
   };
@@ -1274,7 +1284,7 @@ function pickEmergencyBootstrapIntent(frame: PerceptionFrame, memory: MemoryStat
   if (memory.bootstrap_progress.foodSecured) {
     return undefined;
   }
-  const treeAffordance = nearestAffordance(frame, ["tree"]);
+  const treeAffordance = !memory.bootstrap_progress.woodSecured ? nearestAffordance(frame, ["tree"]) : undefined;
   if (treeAffordance) {
     return {
       intentType: "gather",
@@ -1294,8 +1304,8 @@ function pickEmergencyBootstrapIntent(frame: PerceptionFrame, memory: MemoryStat
     };
   }
 
-  const scoutTarget = pickScoutTarget(frame, ["water", "tree", "flat"]);
-  if (!scoutTarget) {
+  const scoutTarget = pickScoutTarget(frame, memory, ["water", "tree", "flat"]);
+  if (!scoutTarget || (scoutTarget.source === "frontier" && isLowLightPhase(memory.mind_state.routinePhase))) {
     return undefined;
   }
 
@@ -1333,8 +1343,9 @@ function nearestAffordance(
 
 function pickScoutTarget(
   frame: PerceptionFrame,
+  memory: MemoryState,
   preferredTypes: Array<NonNullable<PerceptionFrame["terrain_affordances"]>[number]["type"]> = ["tree", "water", "flat", "view"]
-): { location: Vec3; label: string } | undefined {
+): ScoutTarget | undefined {
   const candidateAffordance = frame.terrain_affordances
     ?.filter((entry) => entry.type !== "hazard" && entry.type !== "cave" && preferredTypes.includes(entry.type))
     .sort((left, right) => distanceSquared(frame.position, left.location) - distanceSquared(frame.position, right.location))
@@ -1343,7 +1354,8 @@ function pickScoutTarget(
   if (candidateAffordance) {
     return {
       location: candidateAffordance.location,
-      label: candidateAffordance.type
+      label: scoutAffordanceLabel(candidateAffordance.type),
+      source: "affordance"
     };
   }
 
@@ -1352,14 +1364,142 @@ function pickScoutTarget(
     .sort((left, right) => right.distance - left.distance)
     .find((block) => distanceSquared(frame.position, block.position) > 9);
 
-  if (!candidateBlock) {
+  if (candidateBlock) {
+    return {
+      location: candidateBlock.position,
+      label: scoutBlockLabel(candidateBlock.name),
+      source: "block"
+    };
+  }
+
+  return frontierScoutTarget(frame, memory, preferredTypes);
+}
+
+const FRONTIER_DIRECTIONS: Array<{ x: number; z: number }> = [
+  { x: 1, z: 0 },
+  { x: 1, z: 1 },
+  { x: 0, z: 1 },
+  { x: -1, z: 1 },
+  { x: -1, z: 0 },
+  { x: -1, z: -1 },
+  { x: 0, z: -1 },
+  { x: 1, z: -1 }
+];
+
+function scoutAffordanceLabel(type: NonNullable<PerceptionFrame["terrain_affordances"]>[number]["type"]): string {
+  switch (type) {
+    case "tree":
+      return "tree line";
+    case "water":
+      return "water";
+    case "flat":
+      return "open ground";
+    case "view":
+      return "higher ground";
+    case "slope":
+      return "gentler ground";
+    case "cave":
+      return "cave mouth";
+    case "hazard":
+      return "safer ground";
+  }
+}
+
+function scoutBlockLabel(name: string): string {
+  if (name.includes("log") || name.includes("leaves") || name.includes("sapling")) {
+    return "tree line";
+  }
+  if (name.includes("water")) {
+    return "water";
+  }
+  if (name.includes("grass") || name.includes("dirt") || name.includes("sand") || name.includes("gravel")) {
+    return "open ground";
+  }
+  return name.replace(/_/g, " ");
+}
+
+function frontierScoutTarget(
+  frame: PerceptionFrame,
+  memory: MemoryState,
+  preferredTypes: Array<NonNullable<PerceptionFrame["terrain_affordances"]>[number]["type"]>
+): ScoutTarget | undefined {
+  if (isLowLightPhase(memory.mind_state.routinePhase)) {
     return undefined;
   }
 
-  return {
-    location: candidateBlock.position,
-    label: candidateBlock.name.replace(/_/g, " ")
-  };
+  const radius = memory.bootstrap_progress.shelterSecured ? 8 : 12;
+  const rotation = stableDirectionIndex(
+    [
+      memory.personality_profile.seed,
+      preferredTypes.join(","),
+      String(recentScoutStallCount(memory.recent_action_snapshots))
+    ].join(":"),
+    FRONTIER_DIRECTIONS.length
+  );
+
+  for (let offset = 0; offset < FRONTIER_DIRECTIONS.length; offset += 1) {
+    const direction = FRONTIER_DIRECTIONS[(rotation + offset) % FRONTIER_DIRECTIONS.length];
+    const target = {
+      x: Math.round(frame.position.x + direction.x * radius),
+      y: Math.round(frame.position.y),
+      z: Math.round(frame.position.z + direction.z * radius)
+    };
+    if (distanceSquared(frame.position, target) <= 9) {
+      continue;
+    }
+    if (frame.protected_areas?.some((area) => distanceSquared(area.center, target) <= area.radius * area.radius)) {
+      continue;
+    }
+    return {
+      location: target,
+      label: frontierScoutLabel(preferredTypes),
+      source: "frontier"
+    };
+  }
+
+  return undefined;
+}
+
+function frontierScoutLabel(preferredTypes: Array<NonNullable<PerceptionFrame["terrain_affordances"]>[number]["type"]>): string {
+  if (preferredTypes.includes("tree")) {
+    return "better ground";
+  }
+  if (preferredTypes.includes("water")) {
+    return "better water-bearing ground";
+  }
+  if (preferredTypes.includes("flat")) {
+    return "better open ground";
+  }
+  if (preferredTypes.includes("view")) {
+    return "higher ground";
+  }
+  return "better ground";
+}
+
+function recentScoutStallCount(recentActions: MemoryState["recent_action_snapshots"]): number {
+  return recentActions
+    .slice(-6)
+    .filter(
+      (entry) =>
+        (entry.intent_type === "observe" && entry.position_delta < 0.75) ||
+        (entry.intent_type === "move" && (entry.status === "blocked" || entry.status === "failed" || entry.position_delta < 0.75))
+    ).length;
+}
+
+function stableDirectionIndex(key: string, size: number): number {
+  if (size <= 1) {
+    return 0;
+  }
+  let hash = 2166136261;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % size;
+}
+
+function isLowLightPhase(phase: MemoryState["mind_state"]["routinePhase"]): boolean {
+  return phase === "dusk" || phase === "night";
 }
 
 function craftCandidate(frame: PerceptionFrame, goal: CraftGoal, baseScore: number): DailyCandidatePlan {
@@ -1612,7 +1752,11 @@ function repetitionPenalty(recentActions: MemoryState["recent_action_snapshots"]
   }
   const blocked = recentSame.filter((entry) => entry.status === "blocked" || entry.status === "failed").length;
   const stalled = recentSame.filter((entry) => entry.position_delta < 0.75 && entry.status !== "completed").length;
-  return recentSame.length * 0.12 + blocked * 0.9 + stalled * 0.65;
+  const stationaryObserve = family === "observe" ? recentSame.filter((entry) => entry.intent_type === "observe" && entry.position_delta < 0.75).length : 0;
+  if (family === "observe" && stationaryObserve >= 3) {
+    return 2.6;
+  }
+  return recentSame.length * 0.12 + blocked * 0.9 + stalled * 0.65 + stationaryObserve * 0.55;
 }
 
 function movementCost(

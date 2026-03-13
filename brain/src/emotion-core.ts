@@ -17,6 +17,7 @@ import {
   PerceptionFrame,
   RecentActionSnapshot,
   ReplanTrigger,
+  ResidentMotif,
   ResidentPersonalityProfile,
   ResidentNeedState,
   ValueProfile,
@@ -931,44 +932,38 @@ export function composeEmotionDialogue(
   intentType: string
 ): string {
   const active = memory.emotion_core.active_episode;
+  const baseDialogue = composeBaseIntentDialogue(memory, frame, fallback, intentType);
   if (!active || active.resolved) {
-    const dominant = memory.emotion_core.dominant_emotions[0] ?? "steady";
-    if (dominant === "hopeful") {
-      return fallback.replace(/^I /, "I feel more resolved, and I ");
-    }
-    if (dominant === "settled") {
-      return fallback.replace(/^I /, "I feel steadier, and I ");
-    }
-    return fallback;
+    return baseDialogue;
   }
 
   if (active.kind === "wonder" || active.kind === "beauty") {
-    const subject = active.subject_id_or_label ?? frame.notable_places[0] ?? "this moment";
-    return `Something about ${subject} feels worth really noticing. ${fallback}`.trim();
+    const subject = humanizeNotablePlace(active.subject_id_or_label ?? frame.notable_places[0] ?? "this moment", "subject");
+    return `Something about ${subject} feels worth really noticing. ${baseDialogue}`.trim();
   }
 
   if (active.kind === "attachment" || active.kind === "social") {
     const subject = active.subject_id_or_label ?? "this company";
     const prefix = active.cause_tags.includes("reunion") ? `${subject} being here again matters to me.` : `${subject} matters more than passing by politely.`;
-    return `${prefix} ${fallback}`.trim();
+    return `${prefix} ${baseDialogue}`.trim();
   }
 
   if (active.kind === "nurture") {
     const subject = active.subject_id_or_label ?? "the herd";
-    return `${subject} feels newly vulnerable and important. ${fallback}`.trim();
+    return `${subject} feels newly vulnerable and important. ${baseDialogue}`.trim();
   }
 
   if (active.kind === "play") {
-    return `This moment does not need to be useful to matter. ${fallback}`.trim();
+    return `This moment does not need to be useful to matter. ${baseDialogue}`.trim();
   }
 
   if (active.kind === "milestone") {
-    const subject = active.subject_id_or_label ?? "this place";
-    return `${subject} feels like a first worth keeping. ${fallback}`.trim();
+    const subject = humanizeNotablePlace(active.subject_id_or_label ?? "this place", "subject");
+    return `${subject} feels like a first worth keeping. ${baseDialogue}`.trim();
   }
 
   if (active.kind !== "death") {
-    return fallback;
+    return composeActiveEpisodeOverlay(active, frame, baseDialogue);
   }
 
   const cause = humanizeCauseTag(active.cause_tags.find((tag) => tag !== "death"));
@@ -978,18 +973,547 @@ export function composeEmotionDialogue(
   const traits = memory.personality_profile.traits;
 
   if (traits.threat_sensitivity >= 0.66) {
-    return `${cause ? `I still feel ${cause} ${place}.` : "Dying is still close in me."} ${surroundings} ${intentType === "recover" ? "I want calm and shelter before I risk another mistake." : fallback}${lostItems}`.trim();
+    return `${cause ? `I still feel ${cause} ${place}.` : "Dying is still close in me."} ${surroundings} ${intentType === "recover" ? "I want calm and shelter before I risk another mistake." : baseDialogue}${lostItems}`.trim();
   }
 
   if (traits.openness >= 0.62) {
-    return `${cause ? `I keep replaying ${cause} ${place}.` : "I want to understand how I died."} ${surroundings} ${fallback}${lostItems}`.trim();
+    return `${cause ? `I keep replaying ${cause} ${place}.` : "I want to understand how I died."} ${surroundings} ${baseDialogue}${lostItems}`.trim();
   }
 
   if (traits.conscientiousness >= 0.62) {
-    return `${cause ? `I remember ${cause} ${place}.` : "I remember dying."} ${surroundings} ${intentType === "observe" ? "I should read this situation before I commit again." : fallback}${lostItems}`.trim();
+    return `${cause ? `I remember ${cause} ${place}.` : "I remember dying."} ${surroundings} ${intentType === "observe" ? "I should read this situation before I commit again." : baseDialogue}${lostItems}`.trim();
   }
 
-  return `${cause ? `I remember ${cause} ${place}.` : "I remember dying more clearly than I want to."} ${surroundings} ${fallback}${lostItems}`.trim();
+  return `${cause ? `I remember ${cause} ${place}.` : "I remember dying more clearly than I want to."} ${surroundings} ${baseDialogue}${lostItems}`.trim();
+}
+
+function composeBaseIntentDialogue(
+  memory: MemoryState,
+  frame: PerceptionFrame,
+  fallback: string,
+  intentType: string
+): string {
+  if (intentType === "observe") {
+    return composeNeutralObserveDialogue(memory, frame);
+  }
+  if (intentType === "gather") {
+    return composeNeutralGatherDialogue(memory, frame);
+  }
+  if (intentType === "build" || intentType === "rebuild" || intentType === "repair") {
+    return composeNeutralBuildDialogue(memory, frame);
+  }
+  if (intentType === "move") {
+    return composeNeutralMoveDialogue(memory, frame);
+  }
+  return applyDominantToneToFallback(memory.emotion_core.dominant_emotions[0] ?? "steady", fallback);
+}
+
+function composeActiveEpisodeOverlay(active: EmotionEpisode, frame: PerceptionFrame, baseDialogue: string): string {
+  if (active.kind === "loss") {
+    const cause = humanizeCauseTag(active.cause_tags.find((tag) => tag !== "failure"));
+    const prefix = cause ? `That last ${cause} still needles at me.` : "That last setback is still needling at me.";
+    return `${prefix} ${baseDialogue}`.trim();
+  }
+  if (active.kind === "damage" || active.kind === "combat") {
+    const threat = active.cause_tags.find((tag) => tag !== "combat" && tag !== "damage");
+    const prefix = threat ? `I do not want ${humanizeCauseTag(threat)} to catch me flat-footed again.` : "I do not want to stumble into more hurt.";
+    return `${prefix} ${baseDialogue}`.trim();
+  }
+  if (active.kind === "achievement") {
+    const subject = humanizeNotablePlace(active.subject_id_or_label ?? "this progress", "subject");
+    return `${subject} still feels like proof that I can carry something through. ${baseDialogue}`.trim();
+  }
+  if (active.kind === "safety") {
+    const place = active.focal_location ? describeRelativePlace(active.focal_location, frame.position) : "here";
+    return `This place feels a little steadier ${place}. ${baseDialogue}`.trim();
+  }
+  return baseDialogue;
+}
+
+const OBSERVE_DIALOGUE_TEMPLATES: Record<ResidentMotif, Array<(subject: string) => string>> = {
+  homesteader: [
+    (subject) => `I want to read ${subject} before I decide what belongs here next.`,
+    (subject) => `One steady look at ${subject} will tell me how livable this place can become.`,
+    (subject) => `I should take stock of ${subject} before I commit to the next task.`
+  ],
+  wanderer: [
+    (subject) => `I want to read ${subject} before I choose my path through it.`,
+    (subject) => `One careful look at ${subject} will tell me where the day wants to open.`,
+    (subject) => `I should take the measure of ${subject} before I drift the wrong way.`
+  ],
+  caretaker: [
+    (subject) => `I want to understand ${subject} before I disturb it or lean on it.`,
+    (subject) => `A gentle look at ${subject} will tell me what needs care first.`,
+    (subject) => `I should read ${subject} before I start changing things around me.`
+  ],
+  tinkerer: [
+    (subject) => `I want to test the shape of ${subject} before I commit to a plan.`,
+    (subject) => `A closer read of ${subject} will show what actually fits here.`,
+    (subject) => `I should inspect ${subject} before I waste effort on the wrong move.`
+  ],
+  sentinel: [
+    (subject) => `I need a careful read of ${subject} before I risk a wrong move.`,
+    (subject) => `I want to study ${subject} long enough to see what it could hide.`,
+    (subject) => `I should read ${subject} before I commit myself to it.`
+  ],
+  host: [
+    (subject) => `I want to read ${subject} before I decide how to meet it.`,
+    (subject) => `One honest look at ${subject} will tell me how to move without blundering in.`,
+    (subject) => `I should take in ${subject} before I set the tone here.`
+  ]
+};
+
+const GATHER_DIALOGUE_TEMPLATES: Record<ResidentMotif, Array<(focus: string) => string>> = {
+  homesteader: [
+    (focus) => `I need ${focus} before this place can start feeling properly livable.`,
+    (focus) => `A little ${focus} will let me turn this patch into somewhere I can stay.`,
+    (focus) => `I should bring in ${focus} before I ask anything else from this place.`
+  ],
+  wanderer: [
+    (focus) => `I need ${focus} before this stretch can hold me for long.`,
+    (focus) => `A little ${focus} will turn this stop from a pause into a foothold.`,
+    (focus) => `I should gather ${focus} before I trust this place to keep me.`
+  ],
+  caretaker: [
+    (focus) => `I need ${focus} before I can make a steadier place to care from.`,
+    (focus) => `A little ${focus} will make things gentler and safer here.`,
+    (focus) => `I should gather ${focus} before I start trying to shelter anything else.`
+  ],
+  tinkerer: [
+    (focus) => `I need ${focus} before I can turn this patch into tools and shelter.`,
+    (focus) => `A little ${focus} will give me something real to work with.`,
+    (focus) => `I should gather ${focus} before I waste effort improvising around nothing.`
+  ],
+  sentinel: [
+    (focus) => `I need ${focus} before this ground stops feeling exposed.`,
+    (focus) => `A little ${focus} will buy me cover, tools, and fewer bad surprises.`,
+    (focus) => `I should gather ${focus} before I trust this place at all.`
+  ],
+  host: [
+    (focus) => `I need ${focus} before this place can properly welcome me.`,
+    (focus) => `A little ${focus} will make this patch feel warmer and more usable.`,
+    (focus) => `I should gather ${focus} before I ask this place to hold together.`
+  ]
+};
+
+const BUILD_DIALOGUE_TEMPLATES: Record<ResidentMotif, Array<(focus: string) => string>> = {
+  homesteader: [
+    (focus) => `I need to shape ${focus} before this place can truly hold me.`,
+    (focus) => `A little work on ${focus} will turn this patch into somewhere I can stay.`,
+    (focus) => `I should put real shape into ${focus} before the day slips away from me.`
+  ],
+  wanderer: [
+    (focus) => `I need ${focus} if this stop is going to become more than a pause.`,
+    (focus) => `A little work on ${focus} will turn this stretch into a real foothold.`,
+    (focus) => `I should shape ${focus} before I let this place remain temporary.`
+  ],
+  caretaker: [
+    (focus) => `I need ${focus} before anything here can feel gentler or safer.`,
+    (focus) => `A little care poured into ${focus} will make this place easier to live from.`,
+    (focus) => `I should shape ${focus} before I ask this place to shelter anything else.`
+  ],
+  tinkerer: [
+    (focus) => `I need ${focus} before I can turn this patch into something usable.`,
+    (focus) => `A little structure in ${focus} will give me something real to work with.`,
+    (focus) => `I should build out ${focus} before I waste effort improvising around gaps.`
+  ],
+  sentinel: [
+    (focus) => `I need ${focus} before this ground stops feeling exposed.`,
+    (focus) => `A little work on ${focus} will buy me cover and fewer bad surprises.`,
+    (focus) => `I should fortify ${focus} before I trust this place at all.`
+  ],
+  host: [
+    (focus) => `I need ${focus} before this place can start feeling welcoming.`,
+    (focus) => `A little work on ${focus} will make this patch warmer and easier to use.`,
+    (focus) => `I should shape ${focus} before I ask this place to hold together kindly.`
+  ]
+};
+
+const MOVE_DIALOGUE_TEMPLATES: Record<ResidentMotif, Array<(focus: string) => string>> = {
+  homesteader: [
+    (focus) => `I should head toward ${focus} and see whether it can support a steadier life.`,
+    (focus) => `A closer look at ${focus} might show me where a real foothold belongs.`,
+    (focus) => `I should move toward ${focus} before I waste more time on the wrong patch.`
+  ],
+  wanderer: [
+    (focus) => `I should follow ${focus} and see where it opens the day.`,
+    (focus) => `A little movement toward ${focus} might turn this into the right path.`,
+    (focus) => `I should drift toward ${focus} and see what kind of ground waits there.`
+  ],
+  caretaker: [
+    (focus) => `I should head toward ${focus} and see if it offers a gentler place to work from.`,
+    (focus) => `A closer look at ${focus} might show me where care can actually take hold.`,
+    (focus) => `I should move toward ${focus} before I ask too much from this exposed spot.`
+  ],
+  tinkerer: [
+    (focus) => `I should move toward ${focus} and test whether it gives me better options.`,
+    (focus) => `A better angle on ${focus} might show what really fits here.`,
+    (focus) => `I should head toward ${focus} before I keep guessing from the wrong place.`
+  ],
+  sentinel: [
+    (focus) => `I should head toward ${focus} and see if it buys me safer ground.`,
+    (focus) => `A closer look at ${focus} might put fewer surprises around me.`,
+    (focus) => `I should move toward ${focus} before I stay exposed here any longer.`
+  ],
+  host: [
+    (focus) => `I should head toward ${focus} and see if it offers a better place to settle into.`,
+    (focus) => `A closer look at ${focus} might show where this place becomes more welcoming.`,
+    (focus) => `I should move toward ${focus} before I commit to the wrong corner of this patch.`
+  ]
+};
+
+function composeNeutralObserveDialogue(memory: MemoryState, frame: PerceptionFrame): string {
+  const subject = describeObserveSubject(frame);
+  const motif = memory.personality_profile.motifs.primary;
+  const templates = OBSERVE_DIALOGUE_TEMPLATES[motif] ?? OBSERVE_DIALOGUE_TEMPLATES.homesteader;
+  const tail = observeMoodTail(memory.emotion_core.dominant_emotions[0] ?? "steady");
+  return pickFreshRenderedVariant(
+    memory,
+    templates,
+    [
+      memory.personality_profile.seed,
+      motif,
+      memory.personality_profile.motifs.secondary ?? "",
+      subject,
+      frame.weather,
+      frame.biome ?? "",
+      String(Math.floor(frame.tick_time / 1200))
+    ].join(":"),
+    (template) => [template(subject), tail].filter(Boolean).join(" ").trim(),
+    (line) => `${line} ${repetitionTail("observe", memory, frame)}`.trim()
+  );
+}
+
+function composeNeutralGatherDialogue(memory: MemoryState, frame: PerceptionFrame): string {
+  const focus = describeGatherFocus(frame);
+  const motif = memory.personality_profile.motifs.primary;
+  const templates = GATHER_DIALOGUE_TEMPLATES[motif] ?? GATHER_DIALOGUE_TEMPLATES.homesteader;
+  const tail = gatherMoodTail(memory.emotion_core.dominant_emotions[0] ?? "steady");
+  return pickFreshRenderedVariant(
+    memory,
+    templates,
+    [
+      memory.personality_profile.seed,
+      motif,
+      memory.personality_profile.motifs.secondary ?? "",
+      focus,
+      frame.weather,
+      frame.biome ?? "",
+      String(Math.floor(frame.tick_time / 1200))
+    ].join(":"),
+    (template) => [template(focus), tail].filter(Boolean).join(" ").trim(),
+    (line) => `${line} ${repetitionTail("gather", memory, frame)}`.trim()
+  );
+}
+
+function composeNeutralBuildDialogue(memory: MemoryState, frame: PerceptionFrame): string {
+  const focus = describeBuildFocus(frame);
+  const motif = memory.personality_profile.motifs.primary;
+  const templates = BUILD_DIALOGUE_TEMPLATES[motif] ?? BUILD_DIALOGUE_TEMPLATES.homesteader;
+  const tail = buildMoodTail(memory.emotion_core.dominant_emotions[0] ?? "steady");
+  return pickFreshRenderedVariant(
+    memory,
+    templates,
+    [
+      memory.personality_profile.seed,
+      motif,
+      memory.personality_profile.motifs.secondary ?? "",
+      focus,
+      frame.weather,
+      frame.biome ?? "",
+      String(Math.floor(frame.tick_time / 1200))
+    ].join(":"),
+    (template) => [template(focus), tail].filter(Boolean).join(" ").trim(),
+    (line) => `${line} ${repetitionTail("build", memory, frame)}`.trim()
+  );
+}
+
+function composeNeutralMoveDialogue(memory: MemoryState, frame: PerceptionFrame): string {
+  const focus = describeMoveFocus(frame);
+  const motif = memory.personality_profile.motifs.primary;
+  const templates = MOVE_DIALOGUE_TEMPLATES[motif] ?? MOVE_DIALOGUE_TEMPLATES.homesteader;
+  const tail = moveMoodTail(memory.emotion_core.dominant_emotions[0] ?? "steady");
+  return pickFreshRenderedVariant(
+    memory,
+    templates,
+    [
+      memory.personality_profile.seed,
+      motif,
+      memory.personality_profile.motifs.secondary ?? "",
+      focus,
+      frame.weather,
+      frame.biome ?? "",
+      String(Math.floor(frame.tick_time / 1200))
+    ].join(":"),
+    (template) => [template(focus), tail].filter(Boolean).join(" ").trim(),
+    (line) => `${line} ${repetitionTail("move", memory, frame)}`.trim()
+  );
+}
+
+function applyDominantToneToFallback(dominant: string, fallback: string): string {
+  if (dominant === "hopeful") {
+    return fallback.replace(/^I /, "I feel more resolved, and I ");
+  }
+  if (dominant === "settled") {
+    return fallback.replace(/^I /, "I feel steadier, and I ");
+  }
+  return fallback;
+}
+
+function observeMoodTail(dominant: string): string {
+  if (dominant === "hopeful") {
+    return "There may be a better turn here than panic.";
+  }
+  if (dominant === "settled") {
+    return "A steady look will teach me more than rushing.";
+  }
+  return "";
+}
+
+function gatherMoodTail(dominant: string): string {
+  if (dominant === "hopeful") {
+    return "Once I have that, the rest can finally start taking shape.";
+  }
+  if (dominant === "settled") {
+    return "Steady materials first; the rest can follow.";
+  }
+  return "";
+}
+
+function buildMoodTail(dominant: string): string {
+  if (dominant === "hopeful") {
+    return "If I get the shape right, the rest of life here can start gathering around it.";
+  }
+  if (dominant === "settled") {
+    return "A few solid edges now will make everything else easier.";
+  }
+  return "";
+}
+
+function moveMoodTail(dominant: string): string {
+  if (dominant === "hopeful") {
+    return "There may be a better answer a little farther on.";
+  }
+  if (dominant === "settled") {
+    return "A better read of the ground is worth the walk.";
+  }
+  return "";
+}
+
+function describeObserveSubject(frame: PerceptionFrame): string {
+  const nearbyPlayer = frame.nearby_entities.find((entity) => entity.type === "player");
+  if (nearbyPlayer) {
+    return "this meeting";
+  }
+  if (frame.tick_time <= 1000 && frame.weather === "clear") {
+    return "the morning light around me";
+  }
+  if (frame.tick_time >= 11800 && frame.tick_time <= 13000) {
+    return "the failing light around me";
+  }
+  const overlook = frame.terrain_affordances?.find((entry) => entry.type === "view");
+  if (overlook) {
+    return "the land opening out ahead";
+  }
+  const water = frame.terrain_affordances?.find((entry) => entry.type === "water");
+  if (water) {
+    return "the waterline nearby";
+  }
+  const treeLine = frame.terrain_affordances?.find((entry) => entry.type === "tree");
+  if (treeLine) {
+    return "the tree line nearby";
+  }
+  if (frame.notable_places[0]) {
+    return humanizeNotablePlace(frame.notable_places[0], "subject");
+  }
+  if (frame.home_state.shelterScore < 0.4) {
+    return "this exposed patch of ground";
+  }
+  if (frame.weather !== "clear") {
+    return "the weather and the ground around me";
+  }
+  if (frame.biome) {
+    return `this ${frame.biome.replace(/_/g, " ")} stretch`;
+  }
+  return "the ground around me";
+}
+
+function describeGatherFocus(frame: PerceptionFrame): string {
+  const treeLine = frame.terrain_affordances?.find((entry) => entry.type === "tree");
+  if (treeLine) {
+    return "wood from that tree line";
+  }
+  const logBlock = frame.nearby_blocks.find((block) => block.name.includes("log"));
+  if (logBlock) {
+    return "wood from the nearby logs";
+  }
+  if (frame.home_state.shelterScore < 0.4) {
+    return "enough wood for a first shelter";
+  }
+  if (frame.weather !== "clear") {
+    return "enough wood to get shelter and light up";
+  }
+  if (frame.biome?.includes("forest")) {
+    return "some good wood";
+  }
+  return "some wood";
+}
+
+function describeBuildFocus(frame: PerceptionFrame): string {
+  if (frame.home_state.shelterScore < 0.35) {
+    return "real shelter";
+  }
+  if (!frame.home_state.bedAvailable) {
+    return "a place I can finally sleep";
+  }
+  if (!frame.home_state.workshopReady) {
+    return "a sturdier corner to work from";
+  }
+  if (frame.notable_places[0]) {
+    return humanizeNotablePlace(frame.notable_places[0], "location");
+  }
+  return "a truer home";
+}
+
+function describeMoveFocus(frame: PerceptionFrame): string {
+  const overlook = frame.terrain_affordances?.find((entry) => entry.type === "view");
+  if (overlook) {
+    return "the rise ahead";
+  }
+  const treeLine = frame.terrain_affordances?.find((entry) => entry.type === "tree");
+  if (treeLine) {
+    return "the tree line";
+  }
+  const water = frame.terrain_affordances?.find((entry) => entry.type === "water");
+  if (water) {
+    return "the nearby water";
+  }
+  const flatGround = frame.terrain_affordances?.find((entry) => entry.type === "flat");
+  if (flatGround) {
+    return "the open ground";
+  }
+  if (frame.home_state.shelterScore < 0.4) {
+    return "safer ground";
+  }
+  return "a better foothold";
+}
+
+function withArticle(label: string): string {
+  if (/^(the|this|that|my|our|their)\b/i.test(label) || /[A-Z]/.test(label.charAt(0)) || label.includes("'")) {
+    return label;
+  }
+  return `the ${label}`;
+}
+
+function humanizeNotablePlace(label: string, mode: "subject" | "location"): string {
+  const normalized = label.replace(/_/g, " ").trim().toLowerCase();
+  if (normalized === "good building ground") {
+    return mode === "subject" ? "this flat patch of ground" : "open ground";
+  }
+  if (normalized === "flat ground" || normalized === "open ground") {
+    return mode === "subject" ? "this flat patch of ground" : normalized;
+  }
+  if (normalized === "wide view") {
+    return mode === "subject" ? "the wider view from here" : "higher ground";
+  }
+  if (normalized === "near water") {
+    return mode === "subject" ? "the nearby water" : "nearby water";
+  }
+  if (normalized === "company nearby") {
+    return mode === "subject" ? "this company" : "company";
+  }
+  const humanized = label.replace(/_/g, " ");
+  return mode === "subject" ? withArticle(humanized) : humanized;
+}
+
+function pickStableVariant<T>(items: readonly T[], key: string): T {
+  return items[stableIndex(key, items.length)] ?? items[0];
+}
+
+function pickFreshRenderedVariant<T>(
+  memory: MemoryState,
+  items: readonly T[],
+  key: string,
+  render: (item: T) => string,
+  whenExhausted?: (line: string) => string
+): string {
+  const baseIndex = stableIndex(key, items.length);
+  const recentDialogues = recentThoughtDialogues(memory);
+  for (let offset = 0; offset < items.length; offset += 1) {
+    const item = items[(baseIndex + offset) % items.length] ?? items[0];
+    const candidate = render(item).trim();
+    if (!recentDialogues.has(normalizeDialogue(candidate))) {
+      return candidate;
+    }
+  }
+  const fallback = render(items[baseIndex] ?? items[0]).trim();
+  return whenExhausted ? whenExhausted(fallback) : fallback;
+}
+
+function stableIndex(key: string, size: number): number {
+  if (size <= 1) {
+    return 0;
+  }
+  let hash = 2166136261;
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % size;
+}
+
+function recentThoughtDialogues(memory: MemoryState): Set<string> {
+  return new Set(
+    memory.recent_observations
+      .filter((observation) => observation.source === "dialogue" && observation.tags.includes("thought"))
+      .slice(-6)
+      .map((observation) => normalizeDialogue(observation.summary))
+      .filter(Boolean)
+  );
+}
+
+function normalizeDialogue(line: string): string {
+  return line
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/[.!?]+$/g, "");
+}
+
+function repetitionTail(intentType: "observe" | "gather" | "build" | "move", memory: MemoryState, frame: PerceptionFrame): string {
+  const optionsByIntent: Record<typeof intentType, string[]> = {
+    observe: [
+      "Another angle might show me what I missed.",
+      "I do not want to mistake familiarity for understanding.",
+      "A fresh read may finally make the shape of it click."
+    ],
+    gather: [
+      "I need to make progress instead of thinking in circles.",
+      "Another pass at it may finally give me the materials I need.",
+      "If I keep repeating myself, the work still needs doing."
+    ],
+    build: [
+      "A new pass at the shape might finally show me what belongs here.",
+      "I need a fresher read of the structure than habit is giving me.",
+      "If I keep circling the same line, the place will not improve on its own."
+    ],
+    move: [
+      "A different angle on the ground might finally tell me something new.",
+      "If I keep circling blindly, I will miss what this place is offering.",
+      "A few more steps may make the terrain read differently."
+    ]
+  };
+  const options = optionsByIntent[intentType];
+  return pickStableVariant(
+    options,
+    [
+      memory.personality_profile.seed,
+      intentType,
+      String(Math.floor(frame.tick_time / 80)),
+      String(Math.round(frame.position.x / 4)),
+      String(Math.round(frame.position.z / 4))
+    ].join(":")
+  );
 }
 
 function defaultAxes(): EmotionAppraisal {
@@ -1901,7 +2425,7 @@ function describeCurrentSurroundings(frame: PerceptionFrame): string {
     return "This place feels safer than where I fell.";
   }
   if (frame.notable_places.length > 0) {
-    return `I can already tell I am near ${frame.notable_places[0]}.`;
+    return `I can already tell I am near ${humanizeNotablePlace(frame.notable_places[0], "location")}.`;
   }
   return "The surroundings deserve a real look.";
 }
