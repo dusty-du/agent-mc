@@ -543,6 +543,9 @@ export type EmotionAppraisal = EmotionAppraisalAxes;
 export type EmotionRegulation = EmotionRegulationState;
 
 export interface BootstrapProgress {
+  homeKnown: boolean;
+  starterWoodSecured: boolean;
+  woodReserveLow: boolean;
   woodSecured: boolean;
   toolsReady: boolean;
   shelterSecured: boolean;

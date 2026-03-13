@@ -223,6 +223,66 @@ describe("memory-state", () => {
     expect(memory.emotion_core.tagged_places.some((place) => place.kind === "nursery_site")).toBe(true);
     expect(memory.emotion_core.bonded_entities.some((bond) => bond.kind === "herd" && bond.label.includes("sheep"))).toBe(true);
   });
+
+  it("treats home anchors as known landmarks without pretending they are secure shelter", () => {
+    const memory = syncMemoryState(createMemoryState(), {
+      ...basePerception,
+      home_state: {
+        ...basePerception.home_state,
+        anchor: { x: 12, y: 64, z: -4 },
+        shelterScore: 0.32,
+        bedAvailable: false,
+        workshopReady: false
+      }
+    });
+
+    expect(memory.bootstrap_progress.homeKnown).toBe(true);
+    expect(memory.bootstrap_progress.shelterSecured).toBe(false);
+  });
+
+  it("does not count sticks as structural wood reserves", () => {
+    const memory = syncMemoryState(createMemoryState(), {
+      ...basePerception,
+      inventory: { stick: 16 },
+      home_state: {
+        ...basePerception.home_state,
+        shelterScore: 0.25,
+        bedAvailable: false,
+        workshopReady: false
+      }
+    });
+
+    expect(memory.bootstrap_progress.starterWoodSecured).toBe(false);
+    expect(memory.bootstrap_progress.woodReserveLow).toBe(true);
+  });
+
+  it("distinguishes starter wood from a healthy structural wood reserve", () => {
+    const mediumReserve = syncMemoryState(createMemoryState(), {
+      ...basePerception,
+      inventory: { oak_log: 8 },
+      home_state: {
+        ...basePerception.home_state,
+        shelterScore: 0.32,
+        bedAvailable: false,
+        workshopReady: false
+      }
+    });
+    const healthyReserve = syncMemoryState(createMemoryState(), {
+      ...basePerception,
+      inventory: { oak_log: 8, oak_planks: 8 },
+      home_state: {
+        ...basePerception.home_state,
+        shelterScore: 0.32,
+        bedAvailable: false,
+        workshopReady: false
+      }
+    });
+
+    expect(mediumReserve.bootstrap_progress.starterWoodSecured).toBe(true);
+    expect(mediumReserve.bootstrap_progress.woodReserveLow).toBe(true);
+    expect(healthyReserve.bootstrap_progress.starterWoodSecured).toBe(true);
+    expect(healthyReserve.bootstrap_progress.woodReserveLow).toBe(false);
+  });
 });
 
 const basePerception: PerceptionFrame = {

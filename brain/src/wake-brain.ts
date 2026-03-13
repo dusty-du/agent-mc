@@ -44,9 +44,11 @@ interface SurvivalIntentPlan {
   reason: string;
   successConditions: string[];
   dialogue: string;
+  observationCategory: MemoryObservation["category"];
   observation: string;
   observationTags: string[];
   project?: Pick<ProjectState, "title" | "kind" | "status" | "summary" | "location">;
+  buildIntent?: BuildIntent;
 }
 
 interface DailyCandidatePlan {
@@ -323,12 +325,13 @@ export class WakeBrain {
       };
     }
 
-    const survivalIntent = pickSurvivalIntent(frame, nextMemory);
+    const survivalIntent = pickSurvivalIntent(frame, nextMemory, this.pickBuildIntent(frame, nextMemory, values));
     if (survivalIntent) {
+      const survivalBuildPlan = survivalIntent.buildIntent ? this.buildPlanner.plan(survivalIntent.buildIntent, frame) : undefined;
       observations.push(
         observationFrom(
           frame,
-          survivalIntent.intentType === "recover" ? "recovery" : survivalIntent.intentType === "observe" ? "orientation" : "food",
+          survivalIntent.observationCategory,
           survivalIntent.observation,
           survivalIntent.observationTags
         )
@@ -348,7 +351,8 @@ export class WakeBrain {
         memory: survivalIntent.project ? rememberProject(nextMemory, survivalIntent.project) : nextMemory,
         observations,
         replanLevel,
-        wakeOrientation
+        wakeOrientation,
+        buildPlan: survivalBuildPlan
       };
     }
 
@@ -522,6 +526,7 @@ export class WakeBrain {
       intentType: intent.intent_type,
       target: intent.target,
       reason: intent.reason,
+      observationCategory: emotionObservationCategory(intent.intent_type),
       successConditions:
         intent.intent_type === "observe"
           ? ["the current surroundings are assessed"]
@@ -848,92 +853,160 @@ export class WakeBrain {
   }
 
   private pickBootstrapCandidate(frame: PerceptionFrame, memory: MemoryState, values: ValueProfile): DailyCandidatePlan | undefined {
-    const phase = memory.mind_state.routinePhase;
-    const progress = memory.bootstrap_progress;
-    const treeAffordance = nearestAffordance(frame, ["tree"]);
-
-    if (!progress.woodSecured) {
-      if (treeAffordance) {
-        return {
-          kind: "bootstrap",
-          family: "gather:wood",
-          baseScore: phase === "dawn" || phase === "work" ? 1.08 : 0.96,
-          intent: {
-            agent_id: frame.agent_id,
-            intent_type: "gather",
-            target: "wood",
-            reason: "Gather wood first so shelter, tools, and food systems are actually possible.",
-            priority: 3,
-            cancel_conditions: ["danger appears", "night falls too close"],
-            success_conditions: ["wood collected for basic survival work"],
-            dialogue: composeEmotionDialogue(memory, frame, "I need wood before this place can start feeling livable.", "gather")
-          },
-          observationCategory: "project",
-          observationSummary: "The first good decision is still wood; nothing durable starts without it.",
-          observationTags: ["bootstrap", "wood", "survival"],
-          project: {
-            title: "Bootstrap the basics",
-            kind: "explore",
-            status: "active",
-            summary: "Gather the first materials needed for food and shelter.",
-            location: treeAffordance.location
-          }
-        };
-      }
-
-      const scoutTarget = pickScoutTarget(frame, memory, ["tree", "water", "flat"]);
-      if (scoutTarget && !(scoutTarget.source === "frontier" && isLowLightPhase(phase))) {
-        return {
-          kind: "bootstrap",
-          family: `move:${Math.round(scoutTarget.location.x)}:${Math.round(scoutTarget.location.y)}:${Math.round(scoutTarget.location.z)}`,
-          baseScore: 0.82,
-          intent: {
-            agent_id: frame.agent_id,
-            intent_type: "move",
-            target: scoutTarget.location,
-            reason: `Move toward ${scoutTarget.label} to find better ground for wood, food, and shelter.`,
-            priority: 3,
-            cancel_conditions: ["danger appears", "night falls too close"],
-            success_conditions: ["reached a more promising place to continue surviving"],
-            dialogue: composeEmotionDialogue(
-              memory,
-              frame,
-              `I should head toward the ${scoutTarget.label} and see what it offers.`,
-              "move"
-            )
-          },
-          observationCategory: "project",
-          observationSummary: "Standing still will not solve survival; I need a better foothold.",
-          observationTags: ["bootstrap", "scout", "survival"],
-          project: {
-            title: "Scout a better foothold",
-            kind: "explore",
-            status: "active",
-            summary: `Look for a more promising place near the ${scoutTarget.label}.`,
-            location: scoutTarget.location
-          }
-        };
+    for (const need of rankBootstrapNeeds(frame, memory)) {
+      const candidate =
+        need === "food"
+          ? this.pickFoodBootstrapCandidate(frame, memory)
+          : need === "shelter"
+            ? this.pickShelterBootstrapCandidate(frame, memory, values)
+            : this.pickWoodBootstrapCandidate(frame, memory);
+      if (candidate) {
+        return candidate;
       }
     }
+    return undefined;
+  }
 
-    if (!progress.shelterSecured) {
-      const buildIntent = this.pickBuildIntent(frame, memory, values);
+  private pickWoodBootstrapCandidate(frame: PerceptionFrame, memory: MemoryState): DailyCandidatePlan | undefined {
+    const progress = memory.bootstrap_progress;
+    if (progress.starterWoodSecured && !progress.woodReserveLow) {
+      return undefined;
+    }
+
+    const urgency = woodBootstrapUrgency(frame, memory);
+    const starterNeed = !progress.starterWoodSecured;
+    const treeAffordance = nearestAffordance(frame, ["tree"]);
+    if (treeAffordance) {
+      return {
+        kind: "bootstrap",
+        family: "gather:wood",
+        baseScore: starterNeed ? 1.02 : 0.7 + urgency * 0.28,
+        intent: {
+          agent_id: frame.agent_id,
+          intent_type: "gather",
+          target: "wood",
+          reason: starterNeed
+            ? "Secure the first structural wood before trying to build, craft, or settle."
+            : "Top up structural wood while it is nearby so shelter, tools, and light do not stall later.",
+          priority: 3,
+          cancel_conditions: ["danger appears", "night falls too close"],
+          success_conditions: [starterNeed ? "enough structural wood for the first survival steps" : "wood reserve improved for near-term work"],
+          dialogue: composeEmotionDialogue(
+            memory,
+            frame,
+            starterNeed
+              ? "I need wood before this place can start feeling livable."
+              : "This nearby wood would steady the next few problems before they stack up on me.",
+            "gather"
+          )
+        },
+        observationCategory: "project",
+        observationSummary: starterNeed
+          ? "The first usable materials are still missing, so wood comes first."
+          : "The wood reserve is running thin enough to matter if I leave it alone.",
+        observationTags: starterNeed ? ["bootstrap", "wood", "survival"] : ["bootstrap", "wood", "reserve"],
+        project: {
+          title: starterNeed ? "Bootstrap the basics" : "Rebuild the wood buffer",
+          kind: "explore",
+          status: "active",
+          summary: starterNeed
+            ? "Gather the first materials needed for food and shelter."
+            : "Keep enough structural wood on hand for shelter, tools, and light.",
+          location: treeAffordance.location
+        }
+      };
+    }
+
+    const scoutTarget = pickScoutTarget(frame, memory, ["tree"]);
+    if (!scoutTarget || (scoutTarget.source === "frontier" && isLowLightPhase(memory.mind_state.routinePhase))) {
+      return undefined;
+    }
+    return {
+      kind: "bootstrap",
+      family: `move:${Math.round(scoutTarget.location.x)}:${Math.round(scoutTarget.location.y)}:${Math.round(scoutTarget.location.z)}`,
+      baseScore: 0.58 + urgency * 0.18,
+      intent: {
+        agent_id: frame.agent_id,
+        intent_type: "move",
+        target: scoutTarget.location,
+        reason: `Move toward ${scoutTarget.label} to secure more structural wood.`,
+        priority: 3,
+        cancel_conditions: ["danger appears", "night falls too close"],
+        success_conditions: ["reached a place with better wood access"],
+        dialogue: composeEmotionDialogue(memory, frame, `I should head toward the ${scoutTarget.label} and rebuild my margin a little.`, "move")
+      },
+      observationCategory: "project",
+      observationSummary: "I should move toward better wood access before the reserve shrinks into a bottleneck.",
+      observationTags: ["bootstrap", "wood", "survival"],
+      project: {
+        title: "Rebuild the wood buffer",
+        kind: "explore",
+        status: "active",
+        summary: `Look for sturdier wood access near the ${scoutTarget.label}.`,
+        location: scoutTarget.location
+      }
+    };
+  }
+
+  private pickFoodBootstrapCandidate(frame: PerceptionFrame, memory: MemoryState): DailyCandidatePlan | undefined {
+    if (memory.bootstrap_progress.foodSecured || memory.mind_state.routinePhase === "night") {
+      return undefined;
+    }
+    const scoutTarget = pickFoodScoutTarget(frame, memory);
+    if (!scoutTarget) {
+      return undefined;
+    }
+    const urgency = foodBootstrapUrgency(frame, memory);
+    return {
+      kind: "bootstrap",
+      family: `move:${Math.round(scoutTarget.location.x)}:${Math.round(scoutTarget.location.y)}:${Math.round(scoutTarget.location.z)}`,
+      baseScore: 0.68 + urgency * 0.18,
+      intent: {
+        agent_id: frame.agent_id,
+        intent_type: "move",
+        target: scoutTarget.location,
+        reason: `Move toward ${scoutTarget.label} to improve food security without pretending the current spot will solve it.`,
+        priority: 3,
+        cancel_conditions: ["danger appears", "night falls too close"],
+        success_conditions: ["reached ground that improves the food situation"],
+        dialogue: composeEmotionDialogue(memory, frame, `I should check the ${scoutTarget.label} before hunger starts deciding for me.`, "move")
+      },
+      observationCategory: "food",
+      observationSummary: "Food is the active pressure, so movement should aim at food-bearing ground instead of generic wandering.",
+      observationTags: ["bootstrap", "food", "survival"],
+      project: {
+        title: "Secure food footing",
+        kind: "explore",
+        status: "active",
+        summary: `Look for a better food path near the ${scoutTarget.label}.`,
+        location: scoutTarget.location
+      }
+    };
+  }
+
+  private pickShelterBootstrapCandidate(frame: PerceptionFrame, memory: MemoryState, values: ValueProfile): DailyCandidatePlan | undefined {
+    if (memory.bootstrap_progress.shelterSecured) {
+      return undefined;
+    }
+    const urgency = shelterBootstrapUrgency(frame, memory);
+    const buildIntent = this.pickBuildIntent(frame, memory, values);
+    if (hasShelterMaterials(frame)) {
       return {
         kind: "bootstrap",
         family: `build:${buildIntent.purpose}`,
-        baseScore: phase === "dusk" || phase === "night" ? 1.04 : 0.86,
+        baseScore: 0.72 + urgency * 0.18,
         intent: {
           agent_id: frame.agent_id,
           intent_type: buildIntent.rebuild_of ? "rebuild" : "build",
           target: buildIntent.purpose,
-          reason: "A roof, walls, and a clear home anchor matter before comfort projects do.",
+          reason: "Shelter is still too weak, and I already have enough material to improve it now.",
           priority: 3,
           cancel_conditions: ["danger appears", "materials run out"],
           success_conditions: ["basic shelter becomes safer and more usable"],
           dialogue: composeEmotionDialogue(memory, frame, "I need a shelter that can actually hold the night back.", "build")
         },
         observationCategory: "building",
-        observationSummary: "Temporary shelter is the next real milestone; decoration can wait.",
+        observationSummary: "Shelter is still underbuilt, and the materials are finally in hand to improve it.",
         observationTags: ["bootstrap", "shelter", "survival"],
         project: {
           title: "Secure basic shelter",
@@ -946,43 +1019,35 @@ export class WakeBrain {
       };
     }
 
-    if (!progress.foodSecured && phase !== "night") {
-      const scoutTarget = pickScoutTarget(frame, memory, ["water", "flat", "tree"]);
-      if (scoutTarget && !(scoutTarget.source === "frontier" && isLowLightPhase(phase))) {
-        return {
-          kind: "bootstrap",
-          family: `move:${Math.round(scoutTarget.location.x)}:${Math.round(scoutTarget.location.y)}:${Math.round(scoutTarget.location.z)}`,
-          baseScore: 0.66,
-          intent: {
-            agent_id: frame.agent_id,
-            intent_type: "move",
-            target: scoutTarget.location,
-            reason: `Move toward ${scoutTarget.label} to secure food and better working ground.`,
-            priority: 3,
-            cancel_conditions: ["danger appears", "night falls too close"],
-            success_conditions: ["reached a better place for food or shelter work"],
-            dialogue: composeEmotionDialogue(
-              memory,
-              frame,
-              `I should check the ${scoutTarget.label} before hunger gets louder.`,
-              "move"
-            )
-          },
-          observationCategory: "food",
-          observationSummary: "Food security is still unfinished, so I should move toward better ground for it.",
-          observationTags: ["bootstrap", "food", "survival"],
-          project: {
-            title: "Secure food footing",
-            kind: "explore",
-            status: "active",
-            summary: `Look for food-friendly ground near the ${scoutTarget.label}.`,
-            location: scoutTarget.location
-          }
-        };
-      }
+    const shelterTarget = pickShelterScoutTarget(frame, memory);
+    if (!shelterTarget) {
+      return undefined;
     }
-
-    return undefined;
+    return {
+      kind: "bootstrap",
+      family: `move:${Math.round(shelterTarget.location.x)}:${Math.round(shelterTarget.location.y)}:${Math.round(shelterTarget.location.z)}`,
+      baseScore: 0.64 + urgency * 0.18,
+      intent: {
+        agent_id: frame.agent_id,
+        intent_type: "move",
+        target: shelterTarget.location,
+        reason: `Move toward ${shelterTarget.label} to improve shelter instead of pretending this exposure is fine.`,
+        priority: 3,
+        cancel_conditions: ["danger appears", "night falls too close"],
+        success_conditions: ["reached ground that improves shelter work"],
+        dialogue: composeEmotionDialogue(memory, frame, `I should move toward the ${shelterTarget.label} and make my footing safer.`, "move")
+      },
+      observationCategory: "building",
+      observationSummary: "Shelter is still the weak point, so movement should aim at safer or more buildable ground.",
+      observationTags: ["bootstrap", "shelter", "survival"],
+      project: {
+        title: "Find better shelter footing",
+        kind: "explore",
+        status: "active",
+        summary: `Look for safer or more workable shelter ground near the ${shelterTarget.label}.`,
+        location: shelterTarget.location
+      }
+    };
   }
 
   private pickBuildIntent(frame: PerceptionFrame, memory: MemoryState, values: ValueProfile): BuildIntent {
@@ -1082,51 +1147,38 @@ function nearestHostileDistance(frame: PerceptionFrame): number | undefined {
     .sort((left, right) => left - right)[0];
 }
 
-function pickSurvivalIntent(frame: PerceptionFrame, memory: MemoryState): SurvivalIntentPlan | undefined {
+function pickSurvivalIntent(
+  frame: PerceptionFrame,
+  memory: MemoryState,
+  buildIntent: BuildIntent
+): SurvivalIntentPlan | undefined {
   if (frame.hunger > 8 && frame.pantry_state.emergencyReserveDays >= 1 && memory.bootstrap_progress.foodSecured) {
     return undefined;
   }
 
-  if (hasKnownFood(frame.inventory)) {
-    return {
-      intentType: "eat",
-      reason: "Preserve calories, recover stability, and protect tomorrow.",
-      successConditions: ["safe meal consumed or food source secured"],
-      dialogue: "I should feed myself before doing anything reckless.",
-      observation: "Food security needs attention before larger ambitions.",
-      observationTags: ["food", "survival", "eat"]
-    };
+  if (frame.hunger <= 8 && hasKnownFood(frame.inventory)) {
+    return pickFoodSurvivalIntent(frame, memory);
   }
 
-  if (hasNearbyFarmOpportunity(frame) && memory.bootstrap_progress.shelterSecured && memory.mind_state.routinePhase !== "night") {
-    return {
-      intentType: "farm",
-      reason: "Food systems deserve steady care, especially when reserves are thin.",
-      successConditions: ["crops harvested, planted, or farmland improved"],
-      dialogue: "I should tend the fields before hunger turns into panic.",
-      observation: "Food security needs attention before larger ambitions.",
-      observationTags: ["food", "survival", "farm"],
-      project: {
-        title: "Keep the fields alive",
-        kind: "farm",
-        status: "active",
-        summary: "Food grows through repeated care.",
-        location: frame.home_state.anchor ?? frame.position
-      }
-    };
+  for (const need of rankBootstrapNeeds(frame, memory)) {
+    const intent =
+      need === "food"
+        ? pickFoodSurvivalIntent(frame, memory)
+        : need === "shelter"
+          ? pickShelterSurvivalIntent(frame, memory, buildIntent)
+          : pickWoodSurvivalIntent(frame, memory);
+    if (intent) {
+      return intent;
+    }
   }
 
-  const bootstrapIntent = pickEmergencyBootstrapIntent(frame, memory);
-  if (bootstrapIntent) {
-    return bootstrapIntent;
-  }
-
-  if (!memory.bootstrap_progress.woodSecured || !memory.bootstrap_progress.shelterSecured || !memory.bootstrap_progress.foodSecured) {
+  if (!memory.bootstrap_progress.starterWoodSecured || !memory.bootstrap_progress.shelterSecured || !memory.bootstrap_progress.foodSecured) {
     return undefined;
   }
 
   return {
     intentType: "observe",
+    observationCategory: "orientation",
     reason: "Pause briefly and reassess because no immediate food or movement opportunity is visible yet.",
     successConditions: ["a safer next step becomes clear"],
     dialogue: composeEmotionDialogue(memory, frame, "I need to look carefully before I commit myself.", "observe"),
@@ -1147,7 +1199,7 @@ function shouldFarm(frame: PerceptionFrame, memory: MemoryState): boolean {
   if (frame.hunger <= 8 || frame.pantry_state.emergencyReserveDays < 1) {
     return false;
   }
-  if (!memory.bootstrap_progress.shelterSecured || !memory.bootstrap_progress.woodSecured) {
+  if (!memory.bootstrap_progress.shelterSecured || !memory.bootstrap_progress.starterWoodSecured) {
     return false;
   }
   if (memory.mind_state.routinePhase === "dusk" || memory.mind_state.routinePhase === "night") {
@@ -1280,31 +1332,114 @@ function pickDelightMove(
   };
 }
 
-function pickEmergencyBootstrapIntent(frame: PerceptionFrame, memory: MemoryState): SurvivalIntentPlan | undefined {
+type BootstrapNeed = "food" | "shelter" | "wood";
+
+function rankBootstrapNeeds(frame: PerceptionFrame, memory: MemoryState): BootstrapNeed[] {
+  return [
+    { need: "food" as const, urgency: foodBootstrapUrgency(frame, memory) },
+    { need: "shelter" as const, urgency: shelterBootstrapUrgency(frame, memory) },
+    { need: "wood" as const, urgency: woodBootstrapUrgency(frame, memory) }
+  ]
+    .filter((entry) => entry.urgency > 0.05)
+    .sort((left, right) => right.urgency - left.urgency)
+    .map((entry) => entry.need);
+}
+
+function foodBootstrapUrgency(frame: PerceptionFrame, memory: MemoryState): number {
+  const immediateHunger = frame.hunger <= 6 ? 0.9 : frame.hunger <= 8 ? 0.78 : frame.hunger <= 10 ? 0.34 : 0;
+  if (immediateHunger > 0) {
+    const reservePressure =
+      !memory.bootstrap_progress.foodSecured && !hasKnownFood(frame.inventory)
+        ? frame.pantry_state.emergencyReserveDays < 0.25
+          ? 0.18
+          : frame.pantry_state.emergencyReserveDays < 0.5
+            ? 0.12
+            : 0.06
+        : 0;
+    return Math.min(1, immediateHunger + reservePressure);
+  }
+
   if (memory.bootstrap_progress.foodSecured) {
+    return 0;
+  }
+  const hungerPressure = frame.hunger <= 6 ? 0.88 : frame.hunger <= 8 ? 0.76 : 0.54;
+  const reservePressure =
+    frame.pantry_state.emergencyReserveDays < 0.25 ? 0.18 : frame.pantry_state.emergencyReserveDays < 0.5 ? 0.12 : 0.06;
+  return Math.min(1, hungerPressure + reservePressure);
+}
+
+function shelterBootstrapUrgency(frame: PerceptionFrame, memory: MemoryState): number {
+  if (memory.bootstrap_progress.shelterSecured) {
+    return 0;
+  }
+  let urgency = frame.home_state.shelterScore < 0.35 ? 0.74 : 0.58;
+  if (isLowLightPhase(memory.mind_state.routinePhase) || frame.light_level <= 7) {
+    urgency += 0.18;
+  }
+  if (frame.combat_state.hostilesNearby > 0) {
+    urgency += 0.12;
+  }
+  return Math.min(1, urgency);
+}
+
+function woodBootstrapUrgency(frame: PerceptionFrame, memory: MemoryState): number {
+  const progress = memory.bootstrap_progress;
+  if (!progress.starterWoodSecured) {
+    return 0.82;
+  }
+  if (!progress.woodReserveLow) {
+    return 0;
+  }
+  let urgency = 0.46;
+  if (!progress.toolsReady) {
+    urgency += 0.12;
+  }
+  if (!progress.shelterSecured) {
+    urgency += 0.1;
+  }
+  if (!progress.lightSecured) {
+    urgency += 0.08;
+  }
+  return Math.min(1, urgency);
+}
+
+function pickFoodSurvivalIntent(frame: PerceptionFrame, memory: MemoryState): SurvivalIntentPlan | undefined {
+  if (memory.bootstrap_progress.foodSecured && frame.hunger > 8) {
     return undefined;
   }
-  const treeAffordance = !memory.bootstrap_progress.woodSecured ? nearestAffordance(frame, ["tree"]) : undefined;
-  if (treeAffordance) {
+
+  if (hasKnownFood(frame.inventory)) {
     return {
-      intentType: "gather",
-      target: "wood",
-      reason: "Gather wood first so shelter, tools, and food systems are actually possible.",
-      successConditions: ["wood collected for basic survival work"],
-      dialogue: composeEmotionDialogue(memory, frame, "I need wood before this place can start feeling livable.", "gather"),
-      observation: "I need materials before food security and shelter can take shape.",
-      observationTags: ["bootstrap", "wood", "survival"],
+      intentType: "eat",
+      observationCategory: "food",
+      reason: "Preserve calories, recover stability, and protect tomorrow.",
+      successConditions: ["safe meal consumed or food source secured"],
+      dialogue: "I should feed myself before doing anything reckless.",
+      observation: "Food security needs attention before larger ambitions.",
+      observationTags: ["food", "survival", "eat"]
+    };
+  }
+
+  if (hasNearbyFarmOpportunity(frame) && memory.bootstrap_progress.shelterSecured && memory.mind_state.routinePhase !== "night") {
+    return {
+      intentType: "farm",
+      observationCategory: "food",
+      reason: "Food systems deserve steady care, especially when reserves are thin.",
+      successConditions: ["crops harvested, planted, or farmland improved"],
+      dialogue: "I should tend the fields before hunger turns into panic.",
+      observation: "Food security needs attention before larger ambitions.",
+      observationTags: ["food", "survival", "farm"],
       project: {
-        title: "Bootstrap the basics",
-        kind: "explore",
+        title: "Keep the fields alive",
+        kind: "farm",
         status: "active",
-        summary: "Gather the first materials needed for food and shelter.",
-        location: treeAffordance.location
+        summary: "Food grows through repeated care.",
+        location: frame.home_state.anchor ?? frame.position
       }
     };
   }
 
-  const scoutTarget = pickScoutTarget(frame, memory, ["water", "tree", "flat"]);
+  const scoutTarget = pickFoodScoutTarget(frame, memory);
   if (!scoutTarget || (scoutTarget.source === "frontier" && isLowLightPhase(memory.mind_state.routinePhase))) {
     return undefined;
   }
@@ -1312,24 +1447,177 @@ function pickEmergencyBootstrapIntent(frame: PerceptionFrame, memory: MemoryStat
   return {
     intentType: "move",
     target: scoutTarget.location,
-    reason: `Move toward ${scoutTarget.label} to find better ground for food and shelter.`,
-    successConditions: ["reached a more promising place to continue surviving"],
-    dialogue: composeEmotionDialogue(
-      memory,
-      frame,
-      `I should head toward the ${scoutTarget.label} and see what it offers.`,
-      "move"
-    ),
-    observation: "Standing still will not solve food security; I need a better place to work from.",
-    observationTags: ["bootstrap", "scout", "survival"],
+    observationCategory: "food",
+    reason: `Move toward ${scoutTarget.label} to improve food security instead of waiting for this spot to fix itself.`,
+    successConditions: ["reached ground that improves the food situation"],
+    dialogue: composeEmotionDialogue(memory, frame, `I should check the ${scoutTarget.label} before hunger starts deciding for me.`, "move"),
+    observation: "Food is the active pressure, so movement should aim at food-bearing ground rather than whatever happens to be nearby.",
+    observationTags: ["bootstrap", "food", "survival"],
     project: {
-      title: "Scout a better foothold",
+      title: "Secure food footing",
       kind: "explore",
       status: "active",
-      summary: `Look for a more promising place near the ${scoutTarget.label}.`,
+      summary: `Look for a better food path near the ${scoutTarget.label}.`,
       location: scoutTarget.location
     }
   };
+}
+
+function pickShelterSurvivalIntent(
+  frame: PerceptionFrame,
+  memory: MemoryState,
+  buildIntent: BuildIntent
+): SurvivalIntentPlan | undefined {
+  if (memory.bootstrap_progress.shelterSecured) {
+    return undefined;
+  }
+
+  if (hasShelterMaterials(frame)) {
+    return {
+      intentType: buildIntent.rebuild_of ? "rebuild" : "build",
+      target: buildIntent.purpose,
+      observationCategory: "building",
+      reason: "Shelter is still too weak, and the materials are already here to improve it now.",
+      successConditions: ["basic shelter becomes safer and more usable"],
+      dialogue: composeEmotionDialogue(memory, frame, "I need a shelter that can actually hold the night back.", "build"),
+      observation: "Shelter is the weak point, and there is enough material on hand to improve it immediately.",
+      observationTags: ["bootstrap", "shelter", "survival"],
+      buildIntent,
+      project: {
+        title: "Secure basic shelter",
+        kind: "build",
+        status: "active",
+        summary: "Shape a first shelter before expanding into comfort.",
+        location: frame.home_state.anchor ?? frame.position
+      }
+    };
+  }
+
+  const scoutTarget = pickShelterScoutTarget(frame, memory);
+  if (!scoutTarget || (scoutTarget.source === "frontier" && isLowLightPhase(memory.mind_state.routinePhase))) {
+    return undefined;
+  }
+
+  return {
+    intentType: "move",
+    target: scoutTarget.location,
+    observationCategory: "building",
+    reason: `Move toward ${scoutTarget.label} to improve shelter instead of pretending the current exposure is acceptable.`,
+    successConditions: ["reached ground that improves shelter work"],
+    dialogue: composeEmotionDialogue(memory, frame, `I should move toward the ${scoutTarget.label} and make my footing safer.`, "move"),
+    observation: "Shelter is still the weak point, so movement should aim at safer or more buildable ground.",
+    observationTags: ["bootstrap", "shelter", "survival"],
+    project: {
+      title: "Find better shelter footing",
+      kind: "explore",
+      status: "active",
+      summary: `Look for safer or more workable shelter ground near the ${scoutTarget.label}.`,
+      location: scoutTarget.location
+    }
+  };
+}
+
+function pickWoodSurvivalIntent(frame: PerceptionFrame, memory: MemoryState): SurvivalIntentPlan | undefined {
+  const progress = memory.bootstrap_progress;
+  if (progress.starterWoodSecured && !progress.woodReserveLow) {
+    return undefined;
+  }
+
+  const starterNeed = !progress.starterWoodSecured;
+  const treeAffordance = nearestAffordance(frame, ["tree"]);
+  if (treeAffordance) {
+    return {
+      intentType: "gather",
+      target: "wood",
+      observationCategory: "project",
+      reason: starterNeed
+        ? "Secure the first structural wood before trying to build, craft, or settle."
+        : "Rebuild the structural wood reserve before shelter, tools, or light stall later.",
+      successConditions: [starterNeed ? "enough structural wood for the first survival steps" : "wood reserve improved for near-term work"],
+      dialogue: composeEmotionDialogue(
+        memory,
+        frame,
+        starterNeed
+          ? "I need wood before this place can start feeling livable."
+          : "This nearby wood would steady the next few problems before they stack up on me.",
+        "gather"
+      ),
+      observation: starterNeed
+        ? "I need materials before food security and shelter can take shape."
+        : "The wood reserve is running thin enough to matter if I leave it alone.",
+      observationTags: starterNeed ? ["bootstrap", "wood", "survival"] : ["bootstrap", "wood", "reserve"],
+      project: {
+        title: starterNeed ? "Bootstrap the basics" : "Rebuild the wood buffer",
+        kind: "explore",
+        status: "active",
+        summary: starterNeed
+          ? "Gather the first materials needed for food and shelter."
+          : "Keep enough structural wood on hand for shelter, tools, and light.",
+        location: treeAffordance.location
+      }
+    };
+  }
+
+  const scoutTarget = pickScoutTarget(frame, memory, ["tree"]);
+  if (!scoutTarget || (scoutTarget.source === "frontier" && isLowLightPhase(memory.mind_state.routinePhase))) {
+    return undefined;
+  }
+
+  return {
+    intentType: "move",
+    target: scoutTarget.location,
+    observationCategory: "project",
+    reason: `Move toward ${scoutTarget.label} to secure more structural wood.`,
+    successConditions: ["reached a place with better wood access"],
+    dialogue: composeEmotionDialogue(memory, frame, `I should head toward the ${scoutTarget.label} and rebuild my margin a little.`, "move"),
+    observation: "I should move toward better wood access before the reserve shrinks into a bottleneck.",
+    observationTags: ["bootstrap", "wood", "survival"],
+    project: {
+      title: "Rebuild the wood buffer",
+      kind: "explore",
+      status: "active",
+      summary: `Look for sturdier wood access near the ${scoutTarget.label}.`,
+      location: scoutTarget.location
+    }
+  };
+}
+
+function pickFoodScoutTarget(frame: PerceptionFrame, memory: MemoryState): ScoutTarget | undefined {
+  const ripeCrop = frame.crop_sites?.find((site) => site.stage === "ripe");
+  if (ripeCrop) {
+    return {
+      location: ripeCrop.location,
+      label: `${ripeCrop.crop.replace(/_/g, " ")} patch`,
+      source: "block"
+    };
+  }
+  const animal = frame.nearby_entities
+    .filter((entity) => entity.type === "passive" && entity.position && entity.distance > 3)
+    .sort((left, right) => left.distance - right.distance)[0];
+  if (animal?.position) {
+    return {
+      location: animal.position,
+      label: "animal movement",
+      source: "affordance"
+    };
+  }
+  return pickScoutTarget(frame, memory, ["water", "flat"]);
+}
+
+function pickShelterScoutTarget(frame: PerceptionFrame, memory: MemoryState): ScoutTarget | undefined {
+  const shelter = frame.safe_route_state.nearestShelter ?? (memory.bootstrap_progress.homeKnown ? frame.home_state.anchor : undefined);
+  if (shelter && distanceSquared(frame.position, shelter) > 9) {
+    return {
+      location: shelter,
+      label: memory.bootstrap_progress.homeKnown ? "home ground" : "near shelter",
+      source: "affordance"
+    };
+  }
+  return pickScoutTarget(frame, memory, ["flat"]);
+}
+
+function hasShelterMaterials(frame: PerceptionFrame): boolean {
+  return countStructuralWood(frame.inventory) + countItems(frame.inventory, ["cobblestone", "blackstone", "cobbled_deepslate", "dirt"]) >= 8;
 }
 
 function nearestAffordance(
@@ -1801,6 +2089,20 @@ function rememberProject(
 
 function countAnyPlanks(inventory: Record<string, number>): number {
   return countItems(inventory, Object.keys(inventory).filter((key) => key.endsWith("_planks") || key === "planks"));
+}
+
+function countStructuralWood(inventory: Record<string, number>): number {
+  return countItems(
+    inventory,
+    Object.keys(inventory).filter(
+      (key) =>
+        key.endsWith("_log") ||
+        key.endsWith("_wood") ||
+        key.endsWith("_planks") ||
+        key.endsWith("_stem") ||
+        key.endsWith("_hyphae")
+    )
+  );
 }
 
 function countItems(inventory: Record<string, number>, names: string[]): number {

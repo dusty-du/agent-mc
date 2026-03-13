@@ -88,7 +88,7 @@ describe("WakeBrain combat decisions", () => {
     expect(decision.intent.intent_type).toBe("retreat");
   });
 
-  it("keeps moving toward a better foothold when distant hostiles are present but no retreat target is known", () => {
+  it("keeps moving toward safer shelter footing when distant hostiles are present but no retreat target is known", () => {
     const decision = new WakeBrain().decide(
       withHostile(
         {
@@ -108,9 +108,9 @@ describe("WakeBrain combat decisions", () => {
           },
           terrain_affordances: [
             {
-              type: "water",
+              type: "flat",
               location: { x: 12, y: 64, z: 0 },
-              note: "Water nearby for farming or quiet reflection."
+              note: "Open ground nearby that is easier to secure."
             }
           ],
           pantry_state: {
@@ -269,6 +269,8 @@ describe("WakeBrain combat decisions", () => {
       },
       createMemoryWith({
         bootstrap_progress: {
+          starterWoodSecured: true,
+          woodReserveLow: false,
           woodSecured: true,
           toolsReady: false,
           shelterSecured: false,
@@ -373,6 +375,8 @@ describe("WakeBrain combat decisions", () => {
   it("pivots away from farm after repeated blocked farm attempts", () => {
     const memory = createMemoryWith({
       bootstrap_progress: {
+        starterWoodSecured: true,
+        woodReserveLow: false,
         woodSecured: true,
         toolsReady: true,
         shelterSecured: true,
@@ -454,6 +458,8 @@ describe("WakeBrain combat decisions", () => {
       frame,
       createMemoryWith({
         bootstrap_progress: {
+          starterWoodSecured: true,
+          woodReserveLow: false,
           woodSecured: true,
           toolsReady: true,
           shelterSecured: true,
@@ -486,6 +492,8 @@ describe("WakeBrain combat decisions", () => {
       frame,
       createMemoryWith({
         bootstrap_progress: {
+          starterWoodSecured: true,
+          woodReserveLow: false,
           woodSecured: true,
           toolsReady: true,
           shelterSecured: true,
@@ -521,6 +529,8 @@ describe("WakeBrain combat decisions", () => {
   it("uses respawn emotion interrupts to reorient instead of dropping back into bootstrap autopilot", () => {
     const memory = createMemoryWith({
       bootstrap_progress: {
+        starterWoodSecured: false,
+        woodReserveLow: true,
         woodSecured: false,
         toolsReady: false,
         shelterSecured: false,
@@ -1046,6 +1056,8 @@ describe("WakeBrain combat decisions", () => {
   it("breaks out of repeated stationary observe loops by scouting instead of observing again", () => {
     const memory = createMemoryWith({
       bootstrap_progress: {
+        starterWoodSecured: true,
+        woodReserveLow: false,
         woodSecured: true,
         toolsReady: false,
         shelterSecured: false,
@@ -1109,6 +1121,8 @@ describe("WakeBrain combat decisions", () => {
           chronotype: "steady"
         },
         bootstrap_progress: {
+          starterWoodSecured: true,
+          woodReserveLow: false,
           woodSecured: true,
           toolsReady: true,
           shelterSecured: true,
@@ -1149,9 +1163,18 @@ function withHostile(frame: PerceptionFrame, distance: number): PerceptionFrame 
   };
 }
 
-function createMemoryWith(overrides: Partial<MemoryState>): MemoryState {
+type TestMemoryOverrides = Omit<Partial<MemoryState>, "bootstrap_progress"> & {
+  bootstrap_progress?: Partial<MemoryState["bootstrap_progress"]>;
+};
+
+function createMemoryWith(overrides: TestMemoryOverrides): MemoryState {
+  const base = createMemoryState();
   return {
-    ...createMemoryState(),
-    ...overrides
+    ...base,
+    ...overrides,
+    bootstrap_progress: {
+      ...base.bootstrap_progress,
+      ...overrides.bootstrap_progress
+    }
   };
 }

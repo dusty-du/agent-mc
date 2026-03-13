@@ -88,12 +88,13 @@ describe("SemanticBuildPlanner", () => {
 });
 
 describe("WakeBrain", () => {
-  it("shifts into concrete survival bootstrap when reserves are low", () => {
+  it("eats direct food before wandering or gathering when hunger is urgent", () => {
     const brain = new WakeBrain();
     const decision = brain.decide(
       {
         ...basePerception,
         hunger: 6,
+        inventory: { bread: 2, oak_log: 8, oak_planks: 8 },
         pantry_state: { ...basePerception.pantry_state, emergencyReserveDays: 0.2 },
         terrain_affordances: [
           {
@@ -109,8 +110,70 @@ describe("WakeBrain", () => {
       "hunger_threshold"
     );
 
+    expect(decision.intent.intent_type).toBe("eat");
+  });
+
+  it("gathers wood when wood is the highest unmet bootstrap need and a tree is nearby", () => {
+    const brain = new WakeBrain();
+    const decision = brain.decide(
+      {
+        ...basePerception,
+        inventory: {},
+        hunger: 18,
+        pantry_state: { ...basePerception.pantry_state, emergencyReserveDays: 1.5 },
+        home_state: {
+          ...basePerception.home_state,
+          shelterScore: 0.75,
+          bedAvailable: true,
+          workshopReady: false
+        },
+        terrain_affordances: [
+          {
+            type: "tree",
+            location: { x: 6, y: 64, z: 0 },
+            note: "A small stand of trees nearby."
+          }
+        ]
+      },
+      createMemoryState(),
+      DEFAULT_VALUE_PROFILE,
+      undefined,
+      "spawn"
+    );
+
     expect(decision.intent.intent_type).toBe("gather");
     expect(decision.intent.target).toBe("wood");
+  });
+
+  it("moves toward food-improving ground instead of regathering wood when wood reserves are already healthy", () => {
+    const brain = new WakeBrain();
+    const decision = brain.decide(
+      {
+        ...basePerception,
+        inventory: { oak_log: 8, oak_planks: 8 },
+        hunger: 6,
+        pantry_state: { ...basePerception.pantry_state, emergencyReserveDays: 0.2 },
+        terrain_affordances: [
+          {
+            type: "tree",
+            location: { x: 6, y: 64, z: 0 },
+            note: "A small stand of trees nearby."
+          },
+          {
+            type: "water",
+            location: { x: 10, y: 64, z: 0 },
+            note: "Water nearby for food and farm work."
+          }
+        ]
+      },
+      createMemoryState(),
+      DEFAULT_VALUE_PROFILE,
+      undefined,
+      "hunger_threshold"
+    );
+
+    expect(decision.intent.intent_type).toBe("move");
+    expect(decision.intent.target).toEqual({ x: 10, y: 64, z: 0 });
   });
 
   it("creates a wake orientation from immediate reality plus overnight memory", () => {

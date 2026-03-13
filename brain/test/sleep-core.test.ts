@@ -471,6 +471,9 @@ function sampleBundle() {
       routinePhase: "night" as const
     },
     bootstrap_progress: {
+      homeKnown: true,
+      starterWoodSecured: true,
+      woodReserveLow: false,
       woodSecured: true,
       toolsReady: true,
       shelterSecured: true,

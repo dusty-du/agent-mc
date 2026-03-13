@@ -468,13 +468,19 @@ function deriveAffect(frame: PerceptionFrame, current: AffectState): AffectState
 
 function deriveBootstrapProgress(frame: PerceptionFrame): BootstrapProgress {
   const inventory = frame.inventory;
-  const woodCount = countItems(inventory, woodItems);
+  const structuralWoodCount = countItems(inventory, structuralWoodItems);
   const toolReady = hasTool(inventory, "axe") && hasTool(inventory, "pickaxe");
+  const shelterSecured = frame.home_state.shelterScore >= 0.55;
+  const starterWoodSecured = structuralWoodCount >= 8 || Boolean(inventory.crafting_table) || frame.home_state.workshopReady;
+  const woodReserveLow = structuralWoodCount < (shelterSecured && toolReady ? 8 : 16);
   const torchesNearby = frame.nearby_blocks.some((block) => block.name.includes("torch") || block.name.includes("lantern"));
   return {
-    woodSecured: woodCount >= 8 || Boolean(inventory.crafting_table) || frame.home_state.workshopReady,
+    homeKnown: Boolean(frame.home_state.anchor),
+    starterWoodSecured,
+    woodReserveLow,
+    woodSecured: starterWoodSecured,
     toolsReady: toolReady,
-    shelterSecured: frame.home_state.shelterScore >= 0.55 || Boolean(frame.home_state.anchor),
+    shelterSecured,
     lightSecured: countItems(inventory, ["torch", "lantern"]) >= 4 || torchesNearby || frame.light_level >= 10,
     foodSecured: frame.pantry_state.emergencyReserveDays >= 1 || hasKnownFood(inventory) || frame.farm_state.harvestableTiles > 0,
     bedSecured: frame.home_state.bedAvailable || inventory.white_bed > 0 || inventory.red_bed > 0 || inventory.blue_bed > 0
@@ -506,7 +512,7 @@ function deriveNeedState(
       clamp01((20 - frame.hunger) / 20 + (frame.pantry_state.emergencyReserveDays < 1 ? 0.35 : frame.pantry_state.emergencyReserveDays < 2 ? 0.15 : 0))
     ),
     autonomy: clampAverage(current.autonomy, clamp01(0.45 + (frame.notable_places.length === 0 ? 0.1 : -0.05) + (bootstrap.shelterSecured ? 0.05 : 0))),
-    competence: clampAverage(current.competence, clamp01((bootstrap.toolsReady ? 0.22 : 0.62) + (bootstrap.woodSecured ? -0.08 : 0.12))),
+    competence: clampAverage(current.competence, clamp01((bootstrap.toolsReady ? 0.22 : 0.62) + (bootstrap.starterWoodSecured ? -0.08 : 0.12))),
     relatedness: clampAverage(current.relatedness, clamp01(frame.nearby_entities.some((entity) => entity.type === "player") ? 0.18 : affect.loneliness + 0.08)),
     beauty: clampAverage(current.beauty, clamp01(frame.notable_places.length > 0 ? 0.28 : 0.52))
   };
@@ -614,7 +620,7 @@ function countItems(inventory: Record<string, number>, names: string[]): number 
   return names.reduce((sum, name) => sum + (inventory[name] ?? 0), 0);
 }
 
-const woodItems = [
+const structuralWoodItems = [
   "oak_log",
   "spruce_log",
   "birch_log",
@@ -630,8 +636,7 @@ const woodItems = [
   "acacia_planks",
   "dark_oak_planks",
   "mangrove_planks",
-  "cherry_planks",
-  "stick"
+  "cherry_planks"
 ];
 
 type Vec3Like = {

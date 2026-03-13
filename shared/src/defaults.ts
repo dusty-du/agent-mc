@@ -59,6 +59,9 @@ export const DEFAULT_MIND_STATE: ResidentMindState = {
 };
 
 export const DEFAULT_BOOTSTRAP_PROGRESS: BootstrapProgress = {
+  homeKnown: false,
+  starterWoodSecured: false,
+  woodReserveLow: true,
   woodSecured: false,
   toolsReady: false,
   shelterSecured: false,
