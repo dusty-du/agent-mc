@@ -2,7 +2,7 @@
 
 An implementation scaffold for an autonomous Minecraft resident with:
 
-- `brain/` for the wake brain, unified awake memory, and the rewritten TypeScript sleep-core
+- `brain/` for the wake brain, unified awake memory, and the TypeScript sleep-core
 - `bot/` for the Mineflayer-driven body
 - `plugin/` for slim Paper hooks and player-guided culture events
 - `vendor/always-on-memory-agent/` as a design reference for the sleep rewrite
