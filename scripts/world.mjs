@@ -26,6 +26,12 @@ export const PAPER_USER_AGENT = "agent-hytale/0.1.0 (world bootstrap)";
 export const LOCAL_SERVER_NAME = "agent-hytale-local";
 export const RUNTIME_DIRNAME = ".runtime";
 export const VIEWER_READY_PATTERN = /Prismarine viewer web server running on/;
+export const STRIPPED_LLM_ENV_KEYS = [
+  "OPENAI_API_KEY",
+  "RESIDENT_OPENAI_BASE_URL",
+  "RESIDENT_OPENAI_MODEL",
+  "RESIDENT_REFLECTIVE_OPENAI_MODEL"
+];
 
 class GracefulShutdownError extends Error {
   constructor(reason) {
@@ -266,14 +272,13 @@ export async function bootstrapWorld(options = {}) {
 
   const childEnv = {
     ...env,
-    OPENAI_API_KEY: "example-openai-api-key",
     RESIDENT_BRAIN_PORT: String(config.brainPort),
     RESIDENT_MEMORY_STORE: paths.memoryStorePath,
-    RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
-    RESIDENT_OPENAI_MODEL: "example-chat-model",
-    RESIDENT_REFLECTIVE_OPENAI_MODEL: "example-reflective-model",
     RESIDENT_SLEEP_STORE: paths.sleepStorePath
   };
+  for (const key of STRIPPED_LLM_ENV_KEYS) {
+    delete childEnv[key];
+  }
   const brainProcess = spawnLoggedProcess({
     name: "brain",
     command: process.execPath,

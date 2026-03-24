@@ -112,6 +112,8 @@ It reuses the existing environment variables for the stack:
 
 The full-stack launcher serves the bot viewer at [http://localhost:3000](http://localhost:3000) by default and opens it in your browser once the viewer is ready. Set `MINECRAFT_VIEWER_PORT` to override that port.
 
+The launcher strips inherited LLM endpoint, model, and API-key variables before starting the local brain and bot, so `npm run world` does not ship or reuse hardcoded provider settings. Configure those explicitly when you want model-backed behavior outside the local bootstrap path.
+
 The launcher manages the local EULA acceptance file automatically for this development workflow.
 
 ## Protected Areas
@@ -124,7 +126,7 @@ The Paper plugin can define regions the resident may not alter:
 /residentprotect list
 ```
 
-Set the resident account name in [`config.yml`](plugin/src/main/resources/config.yml) under `resident.username`.
+Set the resident account name in [`plugin/src/main/resources/config.yml`](plugin/src/main/resources/config.yml) under `resident.username`.
 
 ## Notes
 

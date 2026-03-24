@@ -5,6 +5,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  STRIPPED_LLM_ENV_KEYS,
   bootstrapWorld,
   ensurePaperJar,
   resolveWorldConfig,
@@ -184,23 +185,20 @@ describe("world bootstrap", () => {
     expect(spawnCalls[5].args.join(" ")).toContain("bot/dist/index.js");
     expect(spawnCalls[3].env).toEqual(
       expect.objectContaining({
-        OPENAI_API_KEY: "example-openai-api-key",
         RESIDENT_MEMORY_STORE: join(cwd, ".runtime", "brain-data", "memory.json"),
-        RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
-        RESIDENT_SLEEP_STORE: join(cwd, ".runtime", "brain-data", "sleep-core.json"),
-        RESIDENT_REFLECTIVE_OPENAI_MODEL: "example-reflective-model"
+        RESIDENT_SLEEP_STORE: join(cwd, ".runtime", "brain-data", "sleep-core.json")
       })
     );
     expect(spawnCalls[5].env).toEqual(
       expect.objectContaining({
-        OPENAI_API_KEY: "example-openai-api-key",
         RESIDENT_MEMORY_STORE: join(cwd, ".runtime", "brain-data", "memory.json"),
-        RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
-        RESIDENT_OPENAI_MODEL: "example-chat-model",
-        RESIDENT_SLEEP_STORE: join(cwd, ".runtime", "brain-data", "sleep-core.json"),
-        RESIDENT_REFLECTIVE_OPENAI_MODEL: "example-reflective-model"
+        RESIDENT_SLEEP_STORE: join(cwd, ".runtime", "brain-data", "sleep-core.json")
       })
     );
+    for (const key of STRIPPED_LLM_ENV_KEYS) {
+      expect(spawnCalls[3].env?.[key]).toBeUndefined();
+      expect(spawnCalls[5].env?.[key]).toBeUndefined();
+    }
 
     expect(await readFile(join(cwd, ".runtime", "paper", "eula.txt"), "utf8")).toContain("eula=true");
     const properties = await readFile(join(cwd, ".runtime", "paper", "server.properties"), "utf8");
@@ -448,7 +446,7 @@ describe("world bootstrap", () => {
     await session.completionPromise.catch(() => undefined);
   });
 
-  it("overrides conflicting parent llm env when launching brain and bot", async () => {
+  it("strips inherited llm env when launching brain and bot", async () => {
     const cwd = await createTempRepo();
     const output = new PassThrough();
     const spawnCalls: Array<{ command: string; args: string[]; env?: NodeJS.ProcessEnv }> = [];
@@ -548,20 +546,18 @@ describe("world bootstrap", () => {
 
     expect(brainCall?.env).toEqual(
       expect.objectContaining({
-        OPENAI_API_KEY: "example-openai-api-key",
-        RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
-        RESIDENT_OPENAI_MODEL: "example-chat-model",
-        RESIDENT_REFLECTIVE_OPENAI_MODEL: "example-reflective-model"
+        RESIDENT_BRAIN_PORT: "8787"
       })
     );
     expect(botCall?.env).toEqual(
       expect.objectContaining({
-        OPENAI_API_KEY: "example-openai-api-key",
-        RESIDENT_OPENAI_BASE_URL: "https://llm.example.invalid/v1",
-        RESIDENT_OPENAI_MODEL: "example-chat-model",
-        RESIDENT_REFLECTIVE_OPENAI_MODEL: "example-reflective-model"
+        RESIDENT_BRAIN_PORT: "8787"
       })
     );
+    for (const key of STRIPPED_LLM_ENV_KEYS) {
+      expect(brainCall?.env?.[key]).toBeUndefined();
+      expect(botCall?.env?.[key]).toBeUndefined();
+    }
 
     await session.shutdown("test");
     await session.completionPromise.catch(() => undefined);

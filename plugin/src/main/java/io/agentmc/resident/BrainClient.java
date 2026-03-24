@@ -36,7 +36,10 @@ public final class BrainClient {
     public BrainClient(ResidentPlugin plugin) {
         this.plugin = plugin;
 
-        String endpointValue = plugin.getConfig().getString("brain.endpoint", "https://brain.example.invalid/brain/events");
+        String endpointValue = plugin.getConfig().getString(
+            "brain.endpoint",
+            "https://brain.example.invalid/brain/events"
+        );
         this.endpoint = URI.create(endpointValue);
         this.presentationEndpoint = endpoint.resolve("/resident/presentation");
 
